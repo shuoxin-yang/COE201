@@ -61,7 +61,7 @@ Instructor: Shan Chen [cite: 3]
 
 ### Integer Representations [cite: 96, 97]
 * Let $b>1$ be an integer. Any positive integer $n$ can be expressed uniquely in the form: [cite: 99]
-  $$n = a_k b^k + a_{k-1} b^{k-1} + \dots + a_1 b + a_0$$ [cite: 100]
+  $n = a_k b^k + a_{k-1} b^{k-1} + \dots + a_1 b + a_0$ [cite: 100]
   where $k$, $a_i$ are nonnegative integers and $0 \le a_i < b$. [cite: 101]
 * This is the base-$b$ expansion $b$进制展开 of $n$, denoted by $(a_k a_{k-1} \dots a_1 a_0)_b$. [cite: 102]
 
