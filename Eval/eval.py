@@ -30,7 +30,7 @@ def argparser():
     parser.add_argument(
         "--system_prompt",
         type=str,
-        default="你是课程助教。请用准确、清晰、适合学生理解的方式回答课程相关问题。",
+        default="你是离散数学课程助教。请用准确、清晰、适合学生理解的方式回答课程相关问题。",
         help="Optional system prompt used before each conversation.",
     )
     parser.add_argument(

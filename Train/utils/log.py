@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -17,16 +18,35 @@ class Logger:
             if run_name is None and log_path and log_path.endswith(".txt"):
                 log_file = log_path
             elif log_path is not None and run_name is not None:
-                log_file = f"{log_path}/{int(time.time())}_{run_name}.txt"
+                run_dir_name = self._build_run_dir_name(run_name)
+                self.run_dir = os.path.join(log_path, run_dir_name)
+                self.checkpoint_dir = os.path.join(self.run_dir, "checkpoints")
+                self.final_model_dir = os.path.join(self.checkpoint_dir, "model-final")
+                log_file = os.path.join(self.run_dir, "log.txt")
             else:
                 raise ValueError(
                     "Either log_file or both log_path and run_name must be set."
                 )
+        else:
+            self.run_dir = os.path.dirname(log_file) or "."
+            self.checkpoint_dir = os.path.join(self.run_dir, "checkpoints")
+            self.final_model_dir = os.path.join(self.checkpoint_dir, "model-final")
 
         self.log_file = log_file
+        if not hasattr(self, "run_dir"):
+            self.run_dir = os.path.dirname(self.log_file) or "."
+            self.checkpoint_dir = os.path.join(self.run_dir, "checkpoints")
+            self.final_model_dir = os.path.join(self.checkpoint_dir, "model-final")
         log_dir = os.path.dirname(self.log_file)
         if log_dir:
             os.makedirs(log_dir, exist_ok=True)
+        os.makedirs(self.checkpoint_dir, exist_ok=True)
+
+    def _build_run_dir_name(self, run_name: str) -> str:
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        safe_run_name = re.sub(r"[\\/:\s]+", "_", run_name.strip())
+        safe_run_name = safe_run_name.strip("_") or "run"
+        return f"{timestamp}_{safe_run_name}"
 
     def onlylog(self, message: Any, name: str | None = None) -> None:
         with open(self.log_file, "a") as f:

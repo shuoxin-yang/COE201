@@ -34,7 +34,7 @@ def argparser():
     parser.add_argument(
         "--run_name",
         type=str,
-        default="",
+        default="test",
         help="Name for the current run, empty is 'lora_r={rank}_alpha={alpha}_scaling={scaling_type}'",
     )
     parser.add_argument("--rank", type=int, default=8, help="LoRA rank")
@@ -62,11 +62,11 @@ def argparser():
     parser.add_argument(
         "--test_size",
         type=float,
-        default=0.1,
+        default=0.2,
         help="Validation split ratio in [0, 1); use 0 to train without eval split",
     )
     parser.add_argument(
-        "--split_seed",
+        "--seed",
         type=int,
         default=42,
         help="Random seed used for train/test split",
@@ -74,19 +74,19 @@ def argparser():
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="./lora_finetuned_model",
-        help="Directory to save the fine-tuned model",
+        default="./logs",
+        help="Root directory for run logs and checkpoints",
     )
     parser.add_argument(
-        "--num_epochs", type=int, default=3, help="Number of training epochs"
+        "--num_epochs", type=int, default=5, help="Number of training epochs"
     )
     parser.add_argument(
-        "--batch_size", type=int, default=1, help="Training batch size per device"
+        "--batch_size", type=int, default=3, help="Training batch size per device"
     )
     parser.add_argument(
         "--gradient_accumulation_steps",
         type=int,
-        default=16,
+        default=4,
         help="Number of update steps to accumulate before optimizer step",
     )
     parser.add_argument(
@@ -114,7 +114,12 @@ def main():
     device = torch.device("cuda")
     
     # Save config
-    logger.onlylog(vars(args), name="Config")
+    config = vars(args).copy()
+    config["run_dir"] = logger.run_dir
+    config["log_file"] = logger.log_file
+    config["checkpoint_dir"] = logger.checkpoint_dir
+    config["final_model_dir"] = logger.final_model_dir
+    logger.onlylog(config, name="Config")
     
     # Load tokenizer and model
     
@@ -160,7 +165,7 @@ def main():
 
     # Load dataset and preprocess it using the tokenizer
     training_args = TrainingArguments(
-        output_dir=args.output_dir,
+        output_dir=logger.checkpoint_dir,
         num_train_epochs=args.num_epochs,
         per_device_train_batch_size=args.batch_size,
         per_device_eval_batch_size=args.batch_size,
@@ -175,7 +180,7 @@ def main():
         tokenizer=tokenizer,
         max_length=args.max_length,
         test_size=args.test_size,
-        seed=args.split_seed,
+        seed=args.seed,
     )
     eval_dataset = dataset["test"] if "test" in dataset else None
     logger.logandprint(f"train samples: {len(dataset['train'])}")
@@ -207,7 +212,7 @@ def main():
     trainer.save_state()
     logger.logandprint(format_metrics(train_metrics), name="Train Metrics")
 
-    trainer.save_model(args.output_dir)
+    trainer.save_model(logger.final_model_dir)
     if eval_dataset is not None:
         eval_metrics = trainer.evaluate()
         eval_metrics["eval_samples"] = len(eval_dataset)
