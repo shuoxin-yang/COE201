@@ -2,7 +2,7 @@
 ## CS201 Discrete Mathematics [cite: 2]
 Instructor: Shan Chen [cite: 3]
 
----
+## ---
 
 ### Number Theory [cite: 4]
 * Number Theory 数论 is a branch of mathematics that explores integers and their properties. [cite: 5]
@@ -14,7 +14,7 @@ Instructor: Shan Chen [cite: 3]
 * Godfrey Harold Hardy (1877-1947), UK mathematician. [cite: 14]
 * In his autobiography *A Mathematician's Apology*, Hardy wrote: "The great modern achievements of applied mathematics have been in relativity and quantum mechanics, and these subjects are, at present, almost as 'useless' as the theory of numbers." [cite: 15]
 
----
+## ---
 
 ### Divisibility [cite: 20]
 * For integers $a$, $b$ with $a \neq 0$, we say that $a$ divides 整除 $b$ if there is an integer $c$ such that $b=ac$, or equivalently $b/a$ is an integer. [cite: 21]
@@ -57,7 +57,7 @@ Instructor: Shan Chen [cite: 3]
 * Commutativity 交换性: $a +_m b = b +_m a$ and $a \cdot_m b = b \cdot_m a$ [cite: 89, 90]
 * Distributivity 分配性: $a \cdot_m (b +_m c) = (a \cdot_m b) +_m (a \cdot_m c)$ [cite: 91, 92]
 
----
+## ---
 
 ### Integer Representations [cite: 96, 97]
 * Let $b>1$ be an integer. Any positive integer $n$ can be expressed uniquely in the form: [cite: 99]
@@ -80,7 +80,7 @@ Instructor: Shan Chen [cite: 3]
 * $b^n = b^{a_{k-1} 2^{k-1} + \dots + a_1 \cdot 2 + a_0}$ [cite: 220]
 * Time complexity: $O(\log b \log m + \log n (\log m)^2)$ bit operations. [cite: 226]
 
----
+## ---
 
 ### Primes and Prime Factorization [cite: 263]
 * Prime 素数/质数: a positive integer $p \ge 2$ that has only two positive factors 1 and $p$. [cite: 264]
@@ -105,7 +105,7 @@ Instructor: Shan Chen [cite: 3]
 * Goldbach's Conjecture 哥德巴赫猜想 (1+1): Every even integer $> 2$ is the sum of two primes. [cite: 418]
 * Twin-Prime Conjecture 孪生素数猜想: There are infinitely many twin primes (primes that differ by 2). [cite: 424, 425]
 
----
+## ---
 
 ### Greatest Common Divisor (GCD) [cite: 428]
 * The largest integer $d$ such that $d \mid a$ and $d \mid b$ is the greatest common divisor, $gcd(a,b)$. [cite: 429, 430]
@@ -124,7 +124,7 @@ Instructor: Shan Chen [cite: 3]
 * If $a$ and $b$ are positive integers, there exist integers $s$ and $t$ (Bézout coefficients) such that $gcd(a,b) = s \cdot a + t \cdot b$. [cite: 508, 509]
 * Corollary: If $gcd(a,b)=1$ and $a \mid bc$, then $a \mid c$. [cite: 558]
 
----
+## ---
 
 ### Congruences [cite: 568]
 * Definition: $a \equiv b \pmod m \iff m \mid (a-b)$. [cite: 569]
@@ -153,7 +153,7 @@ Instructor: Shan Chen [cite: 3]
 ### Primitive Roots Modulo a Prime [cite: 764]
 * A primitive root 原根 modulo a prime $p$ is an integer $r \in \mathbb{Z}_p$ such that every nonzero element in $\mathbb{Z}_p$ is a power of $r$ modulo $p$. [cite: 765, 766]
 
----
+## ---
 
 ### Hash Functions & PRNGs [cite: 787, 813]
 * A hash function maps data of arbitrary length to fixed-length values. Example: $h(k) = k \bmod m$. [cite: 788, 791]

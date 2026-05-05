@@ -1,11 +1,11 @@
 
 # 06 Induction and Recursion
-## CS201 Discrete Mathematics
+# CS201 Discrete Mathematics
 Instructor: Shan Chen
 
 ---
 
-### Mathematical Induction
+## Mathematical Induction
 
 **Principle of Mathematical Induction (数学归纳法原理)**
 Let $P(n)$ be a predicate, i.e., $P(n)$ is either true or false for any $n$.
@@ -45,7 +45,7 @@ By mathematical induction, $P(n)$ is true for all integers $n \ge 2$.
 
 ---
 
-### Strong Induction (强归纳法)
+## Strong Induction (强归纳法)
 
 **Second Principle of Mathematical Induction:** To prove that $P(n)$ is true for all $n \in \mathbb{Z}^+$, we complete two steps:
 * **Basis step:** prove $P(1)$ is true
@@ -64,7 +64,7 @@ Theorem: Every positive integer is a power of a prime or the product of powers o
 
 ---
 
-### Recursion (递归)
+## Recursion (递归)
 
 **Recursion:** a method of solving a computational problem where its solution depends on solutions to smaller instances of the same problem. Recursive computer programs or algorithms often lead to inductive analysis.
 
@@ -105,7 +105,7 @@ Guess: $M(n) = 2^n - 1$.
 
 ---
 
-### Recurrence Relations (递推关系式)
+## Recurrence Relations (递推关系式)
 
 A recurrence relation tells us how to compute the $n$-th value from some or all of the previous values. To completely specify a function, we must give the initial condition(s) (base cases).
 
@@ -137,7 +137,7 @@ $= 6 \cdot 4^n + (1 - \frac{1}{2^n}) \cdot 4^n = 7 \cdot 4^n - 2^n$
 
 ---
 
-### Divide-and-Conquer Recurrences (分治)
+## Divide-and-Conquer Recurrences (分治)
 
 Divide and Conquer (D&C) recursively breaks down a problem into multiple sub-problems until they are simple enough to be solved directly.
 
