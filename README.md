@@ -99,6 +99,27 @@ BGE
 
 ## QA_Gen
 
+### scripts
+
+#### You should firstly export environment variable
+
+```bash
+export DS_API_KEY=<your_deepseek_api_key>
+```
+
+#### generating qa_pairs for all data in QA_Gen/data/Lecture
+
+```bash
+python QA_Gen/scripts/gen_all_qa.py 
+```
+
+#### generating for single data
+
+```bash
+python QA_Gen/QA_Gen.py --data_file <the path of data> --target_folder <the path of output folder>
+```
+
+
 ### data
 
 #### Lecture
