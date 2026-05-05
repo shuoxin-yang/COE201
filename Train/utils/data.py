@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from datasets import DatasetDict
@@ -9,6 +10,20 @@ from transformers import PreTrainedTokenizerBase
 
 DEFAULT_QA_SYSTEM_PROMPT = ""
 DEFAULT_TYPE_FIELD = "type"
+
+
+def _resolve_data_files(path: str) -> str | list[str]:
+    data_path = Path(path)
+    if data_path.is_file():
+        return str(data_path)
+    if data_path.is_dir():
+        jsonl_files = sorted(
+            str(file_path) for file_path in data_path.rglob("*.jsonl")
+        )
+        if not jsonl_files:
+            raise FileNotFoundError(f"No .jsonl files found in directory: {path}")
+        return jsonl_files
+    raise FileNotFoundError(f"Dataset path does not exist: {path}")
 
 
 def _apply_chat_template(
@@ -111,7 +126,7 @@ def load_qa_dataset(
     system_prompt: str = DEFAULT_QA_SYSTEM_PROMPT,
     data_format: str = "json",
 ) -> DatasetDict:
-    """Load QA json/jsonl data and return tokenized train/test splits for Qwen SFT."""
+    """Load QA json/jsonl file(s) and return tokenized train/test splits for Qwen SFT."""
     if path is None:
         raise ValueError("path must be provided.")
     if tokenizer is None:
@@ -119,7 +134,8 @@ def load_qa_dataset(
     if max_length <= 0:
         raise ValueError("max_length must be greater than 0.")
 
-    raw_dataset = hf_load_dataset(data_format, data_files=path)["train"]
+    data_files = _resolve_data_files(path)
+    raw_dataset = hf_load_dataset(data_format, data_files=data_files)["train"]
     _validate_qa_columns(raw_dataset.column_names, question_field, answer_field)
     _validate_test_size(test_size, len(raw_dataset))
     use_type = (

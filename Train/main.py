@@ -50,7 +50,7 @@ def argparser():
     parser.add_argument(
         "--train_data_path",
         type=str,
-        default="../QA_Gen/QA_pairs/test.jsonl",
+        default="../QA_Gen/QA_pairs",
         help="Path to QA json/jsonl training data",
     )
     parser.add_argument(
@@ -81,7 +81,13 @@ def argparser():
         "--num_epochs", type=int, default=3, help="Number of training epochs"
     )
     parser.add_argument(
-        "--batch_size", type=int, default=16, help="Training batch size"
+        "--batch_size", type=int, default=1, help="Training batch size per device"
+    )
+    parser.add_argument(
+        "--gradient_accumulation_steps",
+        type=int,
+        default=16,
+        help="Number of update steps to accumulate before optimizer step",
     )
     parser.add_argument(
         "--learning_rate",
@@ -158,6 +164,7 @@ def main():
         num_train_epochs=args.num_epochs,
         per_device_train_batch_size=args.batch_size,
         per_device_eval_batch_size=args.batch_size,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
         learning_rate=args.learning_rate,
         logging_steps=10,
         save_steps=100,
@@ -188,6 +195,7 @@ def main():
         eval_dataset=eval_dataset,
         data_collator=data_collator,
     )
+    model.config.use_cache = False
 
     train_result = trainer.train()
     train_metrics = dict(train_result.metrics)
