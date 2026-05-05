@@ -8,6 +8,7 @@ from transformers import PreTrainedTokenizerBase
 
 
 DEFAULT_QA_SYSTEM_PROMPT = ""
+DEFAULT_TYPE_FIELD = "type"
 
 
 def _apply_chat_template(
@@ -47,12 +48,17 @@ def _chat_end_token(tokenizer: PreTrainedTokenizerBase) -> str:
 def _build_prompt(
     tokenizer: PreTrainedTokenizerBase,
     question: str,
+    qa_type: str | None = None,
     system_prompt: str = DEFAULT_QA_SYSTEM_PROMPT,
 ) -> str:
+    question = question.strip()
+    if qa_type:
+        question = f"问题类型：{qa_type.strip()}\n问题：{question}"
+
     messages = []
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
-    messages.append({"role": "user", "content": question.strip()})
+    messages.append({"role": "user", "content": question})
 
     return _apply_chat_template(
         tokenizer,
@@ -100,6 +106,8 @@ def load_qa_dataset(
     seed: int = 42,
     question_field: str = "question",
     answer_field: str = "answer",
+    type_field: str | None = DEFAULT_TYPE_FIELD,
+    include_type_in_prompt: bool = True,
     system_prompt: str = DEFAULT_QA_SYSTEM_PROMPT,
     data_format: str = "json",
 ) -> DatasetDict:
@@ -114,6 +122,11 @@ def load_qa_dataset(
     raw_dataset = hf_load_dataset(data_format, data_files=path)["train"]
     _validate_qa_columns(raw_dataset.column_names, question_field, answer_field)
     _validate_test_size(test_size, len(raw_dataset))
+    use_type = (
+        include_type_in_prompt
+        and type_field is not None
+        and type_field in raw_dataset.column_names
+    )
 
     if test_size > 0:
         raw_splits = raw_dataset.train_test_split(
@@ -129,8 +142,23 @@ def load_qa_dataset(
         attention_mask_list = []
         labels_list = []
 
-        for question, answer in zip(examples[question_field], examples[answer_field]):
-            prompt = _build_prompt(tokenizer, str(question), system_prompt)
+        qa_types = (
+            examples[type_field]
+            if use_type
+            else [None] * len(examples[question_field])
+        )
+
+        for question, answer, qa_type in zip(
+            examples[question_field],
+            examples[answer_field],
+            qa_types,
+        ):
+            prompt = _build_prompt(
+                tokenizer,
+                str(question),
+                str(qa_type) if qa_type is not None else None,
+                system_prompt,
+            )
             response = _build_response(tokenizer, str(answer))
 
             prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
