@@ -7,6 +7,7 @@ from transformers import (
     AutoTokenizer,
     DataCollatorForSeq2Seq,
     Trainer,
+    TrainerCallback,
     TrainingArguments,
 )
 from peft import LoraConfig, get_peft_model, TaskType
@@ -23,6 +24,23 @@ def format_metrics(metrics: dict) -> dict:
             value = round(value, 6)
         formatted[key] = value
     return formatted
+
+
+class TrainerLoggerCallback(TrainerCallback):
+    def __init__(self, logger: Logger):
+        self.logger = logger
+
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        if not logs:
+            return
+
+        metrics = {"global_step": state.global_step}
+        metrics.update(format_metrics(logs))
+        log_type = "Eval" if any(key.startswith("eval_") for key in logs) else "Train"
+        self.logger.onlylog(
+            metrics,
+            name=f"Trainer {log_type} Log Step {state.global_step}",
+        )
 
 
 def argparser():
@@ -199,6 +217,7 @@ def main():
         train_dataset=dataset["train"],
         eval_dataset=eval_dataset,
         data_collator=data_collator,
+        callbacks=[TrainerLoggerCallback(logger)],
     )
     model.config.use_cache = False
 
