@@ -114,7 +114,7 @@ def main():
     device = torch.device("cuda")
     
     # Save config
-    logger.onlylog(f"Config: {vars(args)}")
+    logger.onlylog(vars(args), name="Config")
     
     # Load tokenizer and model
     
@@ -205,7 +205,7 @@ def main():
     trainer.log_metrics("train", train_metrics)
     trainer.save_metrics("train", train_metrics)
     trainer.save_state()
-    logger.logandprint(f"train metrics: {format_metrics(train_metrics)}")
+    logger.logandprint(format_metrics(train_metrics), name="Train Metrics")
 
     trainer.save_model(args.output_dir)
     if eval_dataset is not None:
@@ -213,7 +213,7 @@ def main():
         eval_metrics["eval_samples"] = len(eval_dataset)
         trainer.log_metrics("eval", eval_metrics)
         trainer.save_metrics("eval", eval_metrics)
-        logger.logandprint(f"eval metrics: {format_metrics(eval_metrics)}")
+        logger.logandprint(format_metrics(eval_metrics), name="Eval Metrics")
     else:
         logger.logandprint("eval skipped: no test split was created.")
 
