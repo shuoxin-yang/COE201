@@ -41,6 +41,11 @@ class TrainerLoggerCallback(TrainerCallback):
             metrics,
             name=f"Trainer {log_type} Log Step {state.global_step}",
         )
+        self.logger.log_tensorboard(
+            metrics,
+            step=state.global_step,
+            prefix=log_type.lower(),
+        )
 
 
 def argparser():
@@ -96,6 +101,12 @@ def argparser():
         help="Root directory for run logs and checkpoints",
     )
     parser.add_argument(
+        "--tensorboard-logdir",
+        type=str,
+        default="~/autodl-tf",
+        help="Root directory for TensorBoard event files; disabled when unset",
+    )
+    parser.add_argument(
         "--num_epochs", type=int, default=5, help="Number of training epochs"
     )
     parser.add_argument(
@@ -118,13 +129,15 @@ def argparser():
 
 def main():
     args = argparser()
+    run_name = (
+        args.run_name
+        if args.run_name != ""
+        else f"lora_r={args.rank}_alpha={args.alpha}_scaling={args.scaling_type}"
+    )
     logger = Logger(
-        log_path="./logs",
-        run_name=(
-            args.run_name
-            if args.run_name != ""
-            else f"lora_r={args.rank}_alpha={args.alpha}_scaling={args.scaling_type}"
-        ),
+        log_path=args.output_dir,
+        run_name=run_name,
+        tensorboard_logdir=args.tensorboard_logdir,
     )
     assert (
         torch.cuda.is_available() and torch.cuda.is_bf16_supported()
@@ -137,6 +150,7 @@ def main():
     config["log_file"] = logger.log_file
     config["checkpoint_dir"] = logger.checkpoint_dir
     config["final_model_dir"] = logger.final_model_dir
+    config["tensorboard_logdir"] = logger.tensorboard_logdir
     logger.onlylog(config, name="Config")
     
     # Load tokenizer and model
@@ -229,7 +243,9 @@ def main():
     trainer.log_metrics("train", train_metrics)
     trainer.save_metrics("train", train_metrics)
     trainer.save_state()
-    logger.logandprint(format_metrics(train_metrics), name="Train Metrics")
+    formatted_train_metrics = format_metrics(train_metrics)
+    logger.logandprint(formatted_train_metrics, name="Train Metrics")
+    logger.log_tensorboard(formatted_train_metrics, prefix="train")
 
     trainer.save_model(logger.final_model_dir)
     if eval_dataset is not None:
@@ -237,9 +253,13 @@ def main():
         eval_metrics["eval_samples"] = len(eval_dataset)
         trainer.log_metrics("eval", eval_metrics)
         trainer.save_metrics("eval", eval_metrics)
-        logger.logandprint(format_metrics(eval_metrics), name="Eval Metrics")
+        formatted_eval_metrics = format_metrics(eval_metrics)
+        logger.logandprint(formatted_eval_metrics, name="Eval Metrics")
+        logger.log_tensorboard(formatted_eval_metrics, prefix="eval")
     else:
         logger.logandprint("eval skipped: no test split was created.")
+
+    logger.close()
 
 
 if __name__ == "__main__":
