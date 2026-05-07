@@ -409,7 +409,7 @@ def show_file_distribution(all_pairs: List[dict], title: str):
 
 
 def save_filtered_pairs(pairs: List[dict]):
-    output_path = Path(__file__).parent / "filtered_output.jsonl"
+    output_path = Path(__file__).parent/ "data" / "filtered_output.jsonl"
     with open(output_path, "w", encoding="utf-8") as f:
         for pair in pairs:
             out = {"question": pair["question"], "answer": pair["answer"]}
