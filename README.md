@@ -134,6 +134,10 @@ python QA_Gen/QA_Gen.py --data_file <the path of data> --target_folder <the path
 
 清洗后的QA
 
+### data_information
+
+QA对信息
+
 ### QA_Gen.py
 
 生成QA对的主文件
@@ -141,6 +145,10 @@ python QA_Gen/QA_Gen.py --data_file <the path of data> --target_folder <the path
 ### QA_Filter.py
 
 QA对清洗文件
+
+### QA_Scorer.py
+
+QA对打分文件
 
 ## Train
 

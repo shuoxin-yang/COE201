@@ -302,12 +302,15 @@ def compute_0p05_interval_stats(values: List[float]) -> List[Dict]:
     return stats
 
 
-def compute_length_interval_stats(lengths: List[int], bin_size: int = 50) -> List[Dict]:
+def compute_length_interval_stats(lengths: List[int], bin_size: int = 50, num_bins: int = 12, override_max_bin: Optional[int] = None) -> List[Dict]:
     if not lengths:
         return []
     total = len(lengths)
     max_val = max(lengths)
-    max_regular_bin = min(max_val, bin_size * 12)
+    if override_max_bin is not None:
+        max_regular_bin = override_max_bin
+    else:
+        max_regular_bin = min(max_val, bin_size * num_bins)
     stats = []
     for low in range(0, max_regular_bin, bin_size):
         high = low + bin_size
@@ -409,7 +412,7 @@ def show_file_distribution(all_pairs: List[dict], title: str):
 
 
 def save_filtered_pairs(pairs: List[dict]):
-    output_path = Path(__file__).parent/ "data" / "filtered_output.jsonl"
+    output_path = Path(__file__).parent/ "data" / "ProcessedQA" / "filtered_output.jsonl"
     with open(output_path, "w", encoding="utf-8") as f:
         for pair in pairs:
             out = {"question": pair["question"], "answer": pair["answer"]}
@@ -447,12 +450,12 @@ def show_length_stats_and_save(all_pairs_by_type: Dict[str, List[dict]], csv_dir
     q_stats: Dict[str, List[Dict]] = {}
     a_stats: Dict[str, List[Dict]] = {}
     for t in type_names:
-        qa_stats[t] = compute_length_interval_stats(qa_max_len_by_type[t])
-        q_stats[t] = compute_length_interval_stats(q_len_by_type[t])
-        a_stats[t] = compute_length_interval_stats(a_len_by_type[t])
-    qa_stats["全部"] = compute_length_interval_stats(all_qa_lens)
-    q_stats["全部"] = compute_length_interval_stats(all_q_lens)
-    a_stats["全部"] = compute_length_interval_stats(all_a_lens)
+        qa_stats[t] = compute_length_interval_stats(qa_max_len_by_type[t], num_bins=20)
+        q_stats[t] = compute_length_interval_stats(q_len_by_type[t], override_max_bin=200)
+        a_stats[t] = compute_length_interval_stats(a_len_by_type[t], num_bins=20)
+    qa_stats["全部"] = compute_length_interval_stats(all_qa_lens, num_bins=20)
+    q_stats["全部"] = compute_length_interval_stats(all_q_lens, override_max_bin=200)
+    a_stats["全部"] = compute_length_interval_stats(all_a_lens, num_bins=20)
 
     all_columns = type_names + ["全部"]
 
@@ -601,7 +604,7 @@ def main():
     for t in type_names:
         show_file_distribution(pairs_by_type[t], f"Distribution of {t} across chapters")
 
-    csv_dir = Path(__file__).parent / "data_mformation"
+    csv_dir = Path(__file__).parent / "data_information"
     show_length_stats_and_save(pairs_by_type, csv_dir)
 
     pairs_by_type = prompt_global_length_filter(pairs_by_type)
