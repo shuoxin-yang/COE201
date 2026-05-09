@@ -292,12 +292,12 @@ def main():
         sys.exit(1)
     print(f"Loaded {len(all_pairs)} QA pairs.\n")
 
-    model_name = "Qwen-3.6-27B-FP8"
+    model_name = "Qwen-3.6-27B"
     model_path = resolve_model_path(model_name)
     print(f"Model path: {model_path}")
     if not os.path.isdir(model_path):
         print(f"Error: Model directory not found at {model_path}")
-        print("Please ensure the Qwen-3.6-27B-FP8 model is placed in the model/ directory.")
+        print("Please ensure the Qwen-3.6-27B model is placed in the model/ directory.")
         sys.exit(1)
 
     tokenizer = setup_tokenizer(model_path)
