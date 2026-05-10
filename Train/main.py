@@ -1,6 +1,11 @@
-import os
+from __future__ import annotations
+
 import argparse
 import inspect
+import json
+import math
+import os
+import shutil
 
 import torch
 from transformers import (
@@ -85,6 +90,101 @@ class TrainerLoggerCallback(TrainerCallback):
             loss_metrics["test"] = logs["eval_loss"]
         if loss_metrics:
             self.logger.log_tensorboard(loss_metrics, step=step, prefix="loss")
+
+
+class BestTestLossCheckpointCallback(TrainerCallback):
+    def __init__(self, logger: Logger, tokenizer):
+        self.logger = logger
+        self.tokenizer = tokenizer
+        self.best_loss: float | None = None
+        self.best_step: int | None = None
+
+    def on_evaluate(self, args, state, control, metrics=None, **kwargs):
+        if not metrics or "eval_loss" not in metrics:
+            return
+
+        test_loss = self._to_float(metrics["eval_loss"])
+        if test_loss is None or not math.isfinite(test_loss):
+            return
+        if self.best_loss is not None and test_loss >= self.best_loss:
+            return
+        if not getattr(args, "should_save", True):
+            return
+
+        model = kwargs.get("model")
+        if model is None:
+            self.logger.onlylog(
+                {"global_step": state.global_step, "eval_loss": test_loss},
+                name="Best Test Loss Checkpoint Skipped",
+            )
+            return
+
+        self.best_loss = test_loss
+        self.best_step = state.global_step
+        self._save_best_checkpoint(model, state, metrics, test_loss)
+        self.logger.logandprint(
+            {
+                "global_step": self.best_step,
+                "eval_loss": round(self.best_loss, 6),
+                "checkpoint_dir": self.logger.best_model_dir,
+            },
+            name="Best Test Loss Checkpoint",
+        )
+
+    def _save_best_checkpoint(
+        self,
+        model,
+        state,
+        metrics: dict,
+        test_loss: float,
+    ) -> None:
+        output_dir = self.logger.best_model_dir
+        tmp_output_dir = f"{output_dir}.tmp"
+        if os.path.isdir(tmp_output_dir):
+            shutil.rmtree(tmp_output_dir)
+        os.makedirs(tmp_output_dir, exist_ok=True)
+
+        model.save_pretrained(tmp_output_dir)
+        self.tokenizer.save_pretrained(tmp_output_dir)
+        self._save_metadata(tmp_output_dir, state, metrics, test_loss)
+
+        if os.path.isdir(output_dir):
+            shutil.rmtree(output_dir)
+        os.replace(tmp_output_dir, output_dir)
+
+    def _save_metadata(
+        self,
+        output_dir: str,
+        state,
+        metrics: dict,
+        test_loss: float,
+    ) -> None:
+        if hasattr(state, "save_to_json"):
+            state.save_to_json(os.path.join(output_dir, "trainer_state.json"))
+
+        metadata = {
+            "global_step": state.global_step,
+            "eval_loss": test_loss,
+            "metrics": format_metrics(metrics),
+        }
+        with open(
+            os.path.join(output_dir, "best_checkpoint_metadata.json"),
+            "w",
+            encoding="utf-8",
+        ) as f:
+            json.dump(metadata, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+
+    def _to_float(self, value) -> float | None:
+        if hasattr(value, "item") and callable(value.item):
+            try:
+                value = value.item()
+            except (TypeError, ValueError, RuntimeError):
+                return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
 
 
 def argparser():
@@ -213,6 +313,7 @@ def main():
     config["log_file"] = logger.log_file
     config["checkpoint_dir"] = logger.checkpoint_dir
     config["final_model_dir"] = logger.final_model_dir
+    config["best_model_dir"] = logger.best_model_dir
     config["tensorboard_logdir"] = logger.tensorboard_logdir
     logger.onlylog(config, name="Config")
     
@@ -282,13 +383,17 @@ def main():
         padding=True,
         label_pad_token_id=-100,
     )
+    callbacks = [TrainerLoggerCallback(logger)]
+    if eval_dataset is not None:
+        callbacks.append(BestTestLossCheckpointCallback(logger, tokenizer))
+
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=dataset["train"],
         eval_dataset=eval_dataset,
         data_collator=data_collator,
-        callbacks=[TrainerLoggerCallback(logger)],
+        callbacks=callbacks,
     )
     model.config.use_cache = False
 
