@@ -8,9 +8,6 @@ from typing import List, Dict, Tuple, Optional
 
 os.environ["USE_TF"] = "0"
 os.environ["TRANSFORMERS_VERBOSITY"] = "error"
-os.environ["HF_HUB_DISABLE_SYMLINKS"] = "1"
-os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
-os.environ["HF_HOME"] = str((Path(__file__).parent.parent / "model" / ".hf_cache").resolve())
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
@@ -20,35 +17,22 @@ PROJECT_ROOT = Path(__file__).parent.parent
 MODEL_ROOT = PROJECT_ROOT / "model"
 QA_PROCESSEDQA_DIR = Path(__file__).parent / "data" / "ProcessedQA"
 
+BATCH_SIZE = 16
+MAX_NEW_TOKENS = 64
+
 
 SCORE_SYSTEM_PROMPT = """你是一位严谨的离散数学QA质量评审专家。你的任务是对给定的【问题-答案】对进行质量评分。
 
-## 评分维度
+请从准确性、完整性、逻辑性、表述清晰度、答案详细程度五个维度综合给出一个整数评分（0-5分），仅输出评分，不要输出任何解释。评分标准如下：
 
-请从以下五个维度综合评估该QA对：
+- 5分：完全正确，答案完整、清晰，与课程材料一致，可直接用于教学。
+- 4分：基本正确，略有不足，但核心信息准确。
+- 3分：部分正确，存在小错误，但不影响对核心概念的理解。
+- 2分：错误较多，核心信息不准确。
+- 1分：完全错误或答非所问。
+- 0分：无效内容。
 
-1. **准确性**：答案中的数学定义、定理、公式、推理过程是否完全正确，没有知识性错误。
-2. **完整性**：答案是否完整回答了问题所问的所有方面，没有遗漏关键信息。
-3. **逻辑性**：答案的论证过程是否条理清晰、逻辑严谨、步骤合理。
-4. **表述清晰度**：答案是否用词准确、语言流畅、结构清晰、易于理解。
-5. **答案详细程度**：答案是否提供了足够的细节、示例或推导过程，而非过于简略。
-
-## 评分标准
-
-请根据上述维度综合给出一个整数评分（0-5分）：
-
-- **5分**：完全正确，答案完整、清晰，与课程材料一致。所有维度均表现出色，答案可直接用于教学。
-- **4分**：基本正确，答案略有不足，但核心信息准确。可能缺少少量细节或表述不够完美，但整体质量高。
-- **3分**：部分正确，存在一些小错误，但不影响对核心概念的理解。答案基本可用但需要小幅修正。
-- **2分**：错误较多，核心信息不准确。答案存在明显的知识性错误或逻辑缺陷，需要大幅修改。
-- **1分**：完全错误或答非所问。答案与问题无关，或包含严重错误。
-- **0分**：无效内容。答案为空、无法理解或包含无意义内容。
-
-## 输出格式
-
-你必须严格按照以下JSON格式输出，不要包含任何其他文字（reason在前，score在后）：
-
-{"reason": "<简要评分理由>", "score": <整数0-5>}"""
+仅输出一个整数0-5，不要包含任何其他文字。"""
 
 
 def resolve_model_path(model_name: str) -> str:
@@ -121,37 +105,37 @@ def build_scoring_prompt(question: str, answer: str) -> str:
     return messages
 
 
-def parse_score_response(response_text: str) -> Optional[Dict]:
-    try:
-        json_match = re.search(
-            r'\{[^{}]*"score"\s*:\s*\d+\s*[^{}]*"reason"\s*:\s*"[^"]*"\s*\}'
-            r'|\{[^{}]*"reason"\s*:\s*"[^"]*"\s*[^{}]*"score"\s*:\s*\d+\s*\}',
-            response_text, re.DOTALL
-        )
-        if json_match:
-            result = json.loads(json_match.group())
-            score = int(result.get("score", -1))
-            reason = str(result.get("reason", ""))
+def strip_think(text: str) -> str:
+    return re.sub(r'<think>.*?</think>', '', text, count=1, flags=re.DOTALL).strip()
+
+
+def extract_score(text: str) -> Optional[int]:
+    text = strip_think(text).strip()
+    for pattern in [
+        r'"score"\s*:\s*(\d)',
+        r'score["\s:=]+\s*(\d)',
+        r'得分为?\s*(\d)',
+        r'评分[为:：]?\s*(\d)',
+        r'^(\d)$',
+        r'\b([0-5])\b',
+    ]:
+        match = re.search(pattern, text)
+        if match:
+            score = int(match.group(1))
             if 0 <= score <= 5:
-                return {"score": score, "reason": reason}
-        score_match = re.search(r'"score"\s*:\s*(\d+)', response_text)
-        if score_match:
-            score = int(score_match.group(1))
-            if 0 <= score <= 5:
-                return {"score": score, "reason": "Parsed from model output"}
-    except Exception:
-        pass
+                return score
     return None
 
 
-def score_qa_pair(model, tokenizer, question: str, answer: str, max_retries: int = 2) -> Dict:
+def score_qa_pair(model, tokenizer, question: str, answer: str, debug: bool = False) -> Dict:
     messages = build_scoring_prompt(question, answer)
-    for attempt in range(max_retries + 1):
+    for attempt in range(3):
         try:
             text = tokenizer.apply_chat_template(
                 messages,
                 tokenize=False,
                 add_generation_prompt=True,
+                enable_thinking=False,
             )
             inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=4096)
             input_ids = inputs["input_ids"].to(model.device)
@@ -163,37 +147,96 @@ def score_qa_pair(model, tokenizer, question: str, answer: str, max_retries: int
                 outputs = model.generate(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
-                    max_new_tokens=256,
+                    max_new_tokens=MAX_NEW_TOKENS,
                     temperature=0.1,
                     top_p=0.9,
                     do_sample=False,
                     pad_token_id=tokenizer.pad_token_id,
-                    eos_token_id=tokenizer.eos_token_id,
+                    eos_token_id=model.generation_config.eos_token_id,
                 )
 
             generated_ids = outputs[0][input_ids.shape[1]:]
             response_text = tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
-            parsed = parse_score_response(response_text)
-            if parsed is not None:
-                return parsed
-            if attempt < max_retries:
+            score = extract_score(response_text)
+            if score is not None:
+                return {"score": score}
+            if debug:
+                print(f"\n[DEBUG] Raw model output: '{response_text[:300]}'")
+            if attempt < 2:
                 time.sleep(1)
                 continue
-            return {"score": 0, "reason": f"Failed to parse valid score after {max_retries + 1} attempts. Raw: {response_text[:200]}"}
+            if debug:
+                print(f"  Failed to extract score. Raw: '{response_text[:300]}'")
+            return {"score": 0}
+
+        except torch.cuda.OutOfMemoryError:
+            torch.cuda.empty_cache()
+            if attempt < 2:
+                print("  OOM detected, clearing cache and retrying...")
+                time.sleep(2)
+                continue
+            return {"score": 0}
+        except Exception as e:
+            if attempt < 2:
+                print(f"  Error on attempt {attempt + 1}: {e}, retrying...")
+                time.sleep(1)
+                continue
+            return {"score": 0}
+
+
+def score_qa_pair_batch(model, tokenizer, questions: List[str], answers: List[str], max_retries: int = 2) -> List[Dict]:
+    messages_list = [build_scoring_prompt(q, a) for q, a in zip(questions, answers)]
+    texts = [
+        tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, enable_thinking=False)
+        for messages in messages_list
+    ]
+    for attempt in range(max_retries + 1):
+        try:
+            original_padding_side = tokenizer.padding_side
+            tokenizer.padding_side = "left"
+            inputs = tokenizer(texts, return_tensors="pt", truncation=True, max_length=4096, padding=True)
+            tokenizer.padding_side = original_padding_side
+            input_ids = inputs["input_ids"].to(model.device)
+            attention_mask = inputs["attention_mask"].to(model.device)
+
+            with torch.no_grad():
+                outputs = model.generate(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    max_new_tokens=MAX_NEW_TOKENS,
+                    temperature=0.1,
+                    top_p=0.9,
+                    do_sample=False,
+                    pad_token_id=tokenizer.pad_token_id,
+                    eos_token_id=model.generation_config.eos_token_id,
+                )
+
+            results = []
+            for i in range(len(texts)):
+                pad_len = (inputs["attention_mask"][i] == 0).sum().item()
+                input_len = (inputs["attention_mask"][i] == 1).sum().item()
+                generated_ids = outputs[i][pad_len + input_len:]
+                response_text = tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
+                score = extract_score(response_text)
+                if score is not None:
+                    results.append({"score": score})
+                else:
+                    results.append({"score": 0})
+            return results
 
         except torch.cuda.OutOfMemoryError:
             torch.cuda.empty_cache()
             if attempt < max_retries:
-                print("  OOM detected, clearing cache and retrying...")
+                print(f"  Batch OOM (size={len(texts)}), retrying...")
                 time.sleep(2)
                 continue
-            return {"score": 0, "reason": "OOM error after retries"}
+            return [{"score": 0} for _ in range(len(texts))]
         except Exception as e:
             if attempt < max_retries:
-                print(f"  Error on attempt {attempt + 1}: {e}, retrying...")
+                print(f"  Batch error: {e}, retrying...")
                 time.sleep(1)
                 continue
-            return {"score": 0, "reason": f"Error after {max_retries + 1} attempts: {e}"}
+            return [{"score": 0} for _ in range(len(texts))]
 
 
 def read_filtered_pairs(file_path: Path) -> List[Dict]:
@@ -292,43 +335,57 @@ def main():
         sys.exit(1)
     print(f"Loaded {len(all_pairs)} QA pairs.\n")
 
-    model_name = "Qwen-3.6-27B"
+    model_name = "Qwen3.6-27B"
     model_path = resolve_model_path(model_name)
     print(f"Model path: {model_path}")
     if not os.path.isdir(model_path):
         print(f"Error: Model directory not found at {model_path}")
-        print("Please ensure the Qwen-3.6-27B model is placed in the model/ directory.")
+        print("Please ensure the Qwen3.6-27B model is placed in the model/ directory.")
         sys.exit(1)
 
     tokenizer = setup_tokenizer(model_path)
     model = load_scoring_model(model_path)
 
-    print(f"\nScoring {len(all_pairs)} QA pairs...")
+    print(f"\nScoring {len(all_pairs)} QA pairs with batch_size={BATCH_SIZE}, enable_thinking=False...")
     scored_pairs = []
     scoring_errors = 0
 
-    for idx, pair in enumerate(tqdm(all_pairs, desc="Scoring QA pairs")):
-        question = pair.get("question", "").strip()
-        answer = pair.get("answer", "").strip()
-        if not question or not answer:
-            pair["score"] = 0
-            pair["score_reason"] = "Empty question or answer"
-            scoring_errors += 1
-            scored_pairs.append(pair)
-            continue
+    for idx in range(0, len(all_pairs), BATCH_SIZE):
+        batch = all_pairs[idx:idx + BATCH_SIZE]
+        valid_indices = []
+        questions = []
+        answers = []
 
-        result = score_qa_pair(model, tokenizer, question, answer)
+        for i, pair in enumerate(batch):
+            question = pair.get("question", "").strip()
+            answer = pair.get("answer", "").strip()
+            if not question or not answer:
+                pair["score"] = 0
+                scoring_errors += 1
+                scored_pairs.append(pair)
+            else:
+                valid_indices.append(i)
+                questions.append(question)
+                answers.append(answer)
 
-        pair["score"] = result["score"]
-        pair["score_reason"] = result.get("reason", "")
+        if questions:
+            if len(questions) > 1:
+                results = score_qa_pair_batch(model, tokenizer, questions, answers)
+            else:
+                debug = (idx == 0)
+                results = [score_qa_pair(model, tokenizer, questions[0], answers[0], debug=debug)]
 
-        if result["score"] == 0 and "Failed" in result.get("reason", ""):
-            scoring_errors += 1
+            for j, result in zip(valid_indices, results):
+                pair = batch[j]
+                pair["score"] = result["score"]
+                if result["score"] == 0 and idx == 0:
+                    pass
+                scored_pairs.append(pair)
 
-        scored_pairs.append(pair)
-
-        if (idx + 1) % 20 == 0:
+        if ((idx // BATCH_SIZE) + 1) % 5 == 0:
             torch.cuda.empty_cache()
+
+        tqdm.write(f"  Processed {min(idx + BATCH_SIZE, len(all_pairs))}/{len(all_pairs)} pairs")
 
     print(f"\nScoring complete. Total: {len(scored_pairs)}, Errors/failed: {scoring_errors}")
 

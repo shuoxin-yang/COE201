@@ -18,7 +18,7 @@ def argparser():
     parser.add_argument(
         "--model_name",
         type=str,
-        default="Qwen3.5-4B",
+        default="Qwen3.6-27B",
         help="Base model path or model directory name under Project/model",
     )
     parser.add_argument(
