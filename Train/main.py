@@ -1,5 +1,6 @@
 import os
 import argparse
+import inspect
 
 import torch
 from transformers import (
@@ -26,6 +27,34 @@ def format_metrics(metrics: dict) -> dict:
     return formatted
 
 
+def build_training_arguments(
+    args: argparse.Namespace,
+    logger: Logger,
+    has_eval_dataset: bool,
+) -> TrainingArguments:
+    training_args_kwargs = {
+        "output_dir": logger.checkpoint_dir,
+        "num_train_epochs": args.num_epochs,
+        "per_device_train_batch_size": args.batch_size,
+        "per_device_eval_batch_size": args.batch_size,
+        "gradient_accumulation_steps": args.gradient_accumulation_steps,
+        "learning_rate": args.learning_rate,
+        "logging_steps": args.logging_steps,
+        "save_steps": args.save_steps,
+        "save_total_limit": args.save_total_limit,
+    }
+
+    if has_eval_dataset:
+        signature = inspect.signature(TrainingArguments).parameters
+        eval_strategy_arg = (
+            "eval_strategy" if "eval_strategy" in signature else "evaluation_strategy"
+        )
+        training_args_kwargs[eval_strategy_arg] = "steps"
+        training_args_kwargs["eval_steps"] = args.eval_steps
+
+    return TrainingArguments(**training_args_kwargs)
+
+
 class TrainerLoggerCallback(TrainerCallback):
     def __init__(self, logger: Logger):
         self.logger = logger
@@ -46,6 +75,16 @@ class TrainerLoggerCallback(TrainerCallback):
             step=state.global_step,
             prefix=log_type.lower(),
         )
+        self._log_loss_curves(logs, state.global_step)
+
+    def _log_loss_curves(self, logs: dict, step: int) -> None:
+        loss_metrics = {}
+        if "loss" in logs:
+            loss_metrics["train"] = logs["loss"]
+        if "eval_loss" in logs:
+            loss_metrics["test"] = logs["eval_loss"]
+        if loss_metrics:
+            self.logger.log_tensorboard(loss_metrics, step=step, prefix="loss")
 
 
 def argparser():
@@ -124,6 +163,30 @@ def argparser():
         default=5e-5,
         help="Learning rate for fine-tuning",
     )
+    parser.add_argument(
+        "--logging_steps",
+        type=int,
+        default=10,
+        help="Log training metrics every N update steps",
+    )
+    parser.add_argument(
+        "--eval_steps",
+        type=int,
+        default=10,
+        help="Evaluate test loss every N update steps when a test split exists",
+    )
+    parser.add_argument(
+        "--save_steps",
+        type=int,
+        default=100,
+        help="Save checkpoints every N update steps",
+    )
+    parser.add_argument(
+        "--save_total_limit",
+        type=int,
+        default=5,
+        help="Maximum number of checkpoints to keep",
+    )
     return parser.parse_args()
 
 
@@ -196,17 +259,6 @@ def main():
     )
 
     # Load dataset and preprocess it using the tokenizer
-    training_args = TrainingArguments(
-        output_dir=logger.checkpoint_dir,
-        num_train_epochs=args.num_epochs,
-        per_device_train_batch_size=args.batch_size,
-        per_device_eval_batch_size=args.batch_size,
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        learning_rate=args.learning_rate,
-        logging_steps=10,
-        save_steps=100,
-        save_total_limit=5,
-    )
     dataset = load_qa_dataset(
         path=args.train_data_path,
         tokenizer=tokenizer,
@@ -218,6 +270,11 @@ def main():
     logger.logandprint(f"train samples: {len(dataset['train'])}")
     if eval_dataset is not None:
         logger.logandprint(f"test samples: {len(eval_dataset)}")
+    training_args = build_training_arguments(
+        args=args,
+        logger=logger,
+        has_eval_dataset=eval_dataset is not None,
+    )
 
     data_collator = DataCollatorForSeq2Seq(
         tokenizer=tokenizer,
@@ -246,16 +303,31 @@ def main():
     formatted_train_metrics = format_metrics(train_metrics)
     logger.logandprint(formatted_train_metrics, name="Train Metrics")
     logger.log_tensorboard(formatted_train_metrics, prefix="train")
+    logger.log_tensorboard(
+        {"train": formatted_train_metrics["training_loss"]},
+        step=train_result.global_step,
+        prefix="loss",
+    )
 
     trainer.save_model(logger.final_model_dir)
     if eval_dataset is not None:
         eval_metrics = trainer.evaluate()
         eval_metrics["eval_samples"] = len(eval_dataset)
+        eval_metrics["global_step"] = trainer.state.global_step
         trainer.log_metrics("eval", eval_metrics)
         trainer.save_metrics("eval", eval_metrics)
         formatted_eval_metrics = format_metrics(eval_metrics)
         logger.logandprint(formatted_eval_metrics, name="Eval Metrics")
-        logger.log_tensorboard(formatted_eval_metrics, prefix="eval")
+        logger.log_tensorboard(
+            formatted_eval_metrics,
+            step=trainer.state.global_step,
+            prefix="eval",
+        )
+        logger.log_tensorboard(
+            {"test": formatted_eval_metrics["eval_loss"]},
+            step=trainer.state.global_step,
+            prefix="loss",
+        )
     else:
         logger.logandprint("eval skipped: no test split was created.")
 
