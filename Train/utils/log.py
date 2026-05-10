@@ -44,6 +44,7 @@ class Logger:
             self.run_dir_name = os.path.basename(os.path.normpath(self.run_dir))
             self.checkpoint_dir = os.path.join(self.run_dir, "checkpoints")
             self.final_model_dir = os.path.join(self.checkpoint_dir, "model-final")
+        self.best_model_dir = os.path.join(self.checkpoint_dir, "model-best-testloss")
         log_dir = os.path.dirname(self.log_file)
         if log_dir:
             os.makedirs(log_dir, exist_ok=True)
