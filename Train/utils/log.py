@@ -171,7 +171,7 @@ class Logger:
             ) from exc
 
         self.tensorboard_logdir = os.path.join(
-            tensorboard_logdir,
+            os.path.expanduser(tensorboard_logdir),
             getattr(self, "run_dir_name", "run"),
         )
         os.makedirs(self.tensorboard_logdir, exist_ok=True)
