@@ -11,3 +11,5 @@
 
 **/*cache
 **/tmp/
+
+/model/Qwen*
