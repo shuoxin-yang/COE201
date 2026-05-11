@@ -3,7 +3,11 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import torch
 from peft import PeftModel
@@ -12,6 +16,23 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MODEL_ROOT = PROJECT_ROOT / "model"
+TRAIN_DIR = PROJECT_ROOT / "Train"
+DEFAULT_MODEL_NAME = "Qwen3.6-27B"
+PEFT_ADAPTER_CONFIG = "adapter_config.json"
+TRAINING_CONFIG = "config.yaml"
+SAFE_WEIGHTS = "model.safetensors"
+PYTORCH_WEIGHTS = "pytorch_model.bin"
+SAFE_WEIGHTS_INDEX = "model.safetensors.index.json"
+PYTORCH_WEIGHTS_INDEX = "pytorch_model.bin.index.json"
+
+
+@dataclass(frozen=True)
+class AdapterLoadSpec:
+    kind: str
+    path: Path
+    method_name: str | None = None
+    method_config: dict[str, Any] | None = None
+    base_model_name_or_path: str | None = None
 
 
 def argparser():
@@ -19,14 +40,22 @@ def argparser():
     parser.add_argument(
         "--model_name",
         type=str,
-        default="Qwen3.6-27B",
-        help="Base model path or model directory name under Project/model",
+        default=DEFAULT_MODEL_NAME,
+        help=(
+            "Base model path or model directory name under Project/model. "
+            "When a training checkpoint records its base model and this argument "
+            f"is left as the default ({DEFAULT_MODEL_NAME}), that recorded model "
+            "is used automatically."
+        ),
     )
     parser.add_argument(
         "--adapter_path",
         type=str,
         default=None,
-        help="Optional PEFT adapter path. Supports LoRA, PrefixFT, and AdapterFinetuning checkpoints.",
+        help=(
+            "Optional adapter/checkpoint path. Supports PEFT LoRA/PrefixFT adapter "
+            "directories and custom AdapterFinetuning Trainer checkpoints."
+        ),
     )
     parser.add_argument(
         "--system_prompt",
@@ -81,53 +110,252 @@ def argparser():
 def resolve_model_path(model_name: str) -> str:
     model_path = Path(model_name).expanduser()
     if model_path.is_dir():
-        return str(model_path)
+        return str(model_path.resolve())
+
+    if not model_path.is_absolute():
+        project_relative_path = PROJECT_ROOT / model_path
+        if project_relative_path.is_dir():
+            return str(project_relative_path.resolve())
 
     project_model_path = MODEL_ROOT / model_name
     if project_model_path.is_dir():
-        return str(project_model_path)
+        return str(project_model_path.resolve())
 
     return model_name
 
 
-def resolve_adapter_path(adapter_path: str | None) -> str | None:
+def resolve_existing_path(path_value: str) -> Path:
+    path = Path(path_value).expanduser()
+    if path.is_absolute():
+        candidates = [path]
+    else:
+        candidates = [
+            Path.cwd() / path,
+            PROJECT_ROOT / path,
+            TRAIN_DIR / path,
+        ]
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.resolve()
+    raise FileNotFoundError(f"Adapter/checkpoint path does not exist: {path_value}")
+
+
+def resolve_adapter_checkpoint(adapter_path: str | None) -> AdapterLoadSpec | None:
     if adapter_path is None:
         return None
 
-    path = Path(adapter_path).expanduser()
-    if not path.exists():
-        project_path = PROJECT_ROOT / adapter_path
-        if project_path.exists():
-            path = project_path
-    if not path.exists():
-        raise FileNotFoundError(f"PEFT adapter path does not exist: {adapter_path}")
+    path = resolve_existing_path(adapter_path)
     if path.is_file():
-        raise ValueError(f"PEFT adapter path must be a directory: {adapter_path}")
-    if (path / "adapter_config.json").is_file():
-        return str(path)
+        raise ValueError(f"Adapter/checkpoint path must be a directory: {adapter_path}")
 
+    peft_path = find_peft_adapter_path(path)
+    if peft_path is not None:
+        return AdapterLoadSpec(
+            kind="peft",
+            path=peft_path,
+            method_name=read_peft_type(peft_path),
+            base_model_name_or_path=read_peft_base_model(peft_path),
+        )
+
+    adapter_finetuning_path = find_adapter_finetuning_checkpoint(path)
+    if adapter_finetuning_path is not None:
+        method_config, base_model_name = read_adapter_finetuning_config(
+            adapter_finetuning_path
+        )
+        return AdapterLoadSpec(
+            kind="adapter_finetuning",
+            path=adapter_finetuning_path,
+            method_name="AdapterFinetuning",
+            method_config=method_config,
+            base_model_name_or_path=base_model_name,
+        )
+
+    raise FileNotFoundError(
+        "No PEFT adapter_config.json or AdapterFinetuning model weights found "
+        f"under adapter/checkpoint path: {adapter_path}"
+    )
+
+
+def find_peft_adapter_path(path: Path) -> Path | None:
+    if (path / PEFT_ADAPTER_CONFIG).is_file():
+        return path
     adapter_configs = sorted(
-        path.rglob("adapter_config.json"),
+        path.rglob(PEFT_ADAPTER_CONFIG),
         key=lambda config_path: adapter_sort_key(config_path.parent),
     )
     if not adapter_configs:
-        raise FileNotFoundError(
-            f"No adapter_config.json found under PEFT adapter path: {adapter_path}"
+        return None
+    return adapter_configs[-1].parent
+
+
+def read_json(path: Path) -> dict[str, Any]:
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def read_peft_type(path: Path) -> str:
+    config = read_json(path / PEFT_ADAPTER_CONFIG)
+    return str(config.get("peft_type", "unknown"))
+
+
+def read_peft_base_model(path: Path) -> str | None:
+    config = read_json(path / PEFT_ADAPTER_CONFIG)
+    base_model = config.get("base_model_name_or_path")
+    return str(base_model) if base_model else None
+
+
+def has_model_weights(path: Path) -> bool:
+    return any(
+        (path / filename).is_file()
+        for filename in (
+            SAFE_WEIGHTS,
+            PYTORCH_WEIGHTS,
+            SAFE_WEIGHTS_INDEX,
+            PYTORCH_WEIGHTS_INDEX,
         )
-    return str(adapter_configs[-1].parent)
+    )
 
 
-def adapter_info(adapter_path: str | None) -> dict:
-    if adapter_path is None:
+def find_adapter_finetuning_checkpoint(path: Path) -> Path | None:
+    if has_model_weights(path) and is_adapter_finetuning_checkpoint(path):
+        return path
+
+    candidates = []
+    seen = set()
+    for config_path in path.rglob("config.json"):
+        candidate = config_path.parent
+        if candidate in seen or not has_model_weights(candidate):
+            continue
+        seen.add(candidate)
+        if is_adapter_finetuning_checkpoint(candidate):
+            candidates.append(candidate)
+
+    if not candidates:
+        return None
+    return sorted(candidates, key=adapter_sort_key)[-1]
+
+
+def is_adapter_finetuning_checkpoint(path: Path) -> bool:
+    method = infer_training_method(path)
+    if method is not None:
+        return method == "AdapterFinetuning"
+    return state_dict_has_adapter_finetuning_keys(path)
+
+
+def infer_training_method(path: Path) -> str | None:
+    training_config_path = find_training_config_path(path)
+    run_dir = training_config_path.parent if training_config_path is not None else None
+    if run_dir is not None:
+        log_path = run_dir / "log.txt"
+        if log_path.is_file():
+            match = re.search(
+                r"^\s*active_method:\s*(\S+)\s*$",
+                log_path.read_text(encoding="utf-8", errors="ignore"),
+                flags=re.MULTILINE,
+            )
+            if match:
+                return normalize_method_name(match.group(1))
+
+    for part in reversed(path.parts):
+        normalized = normalize_method_name(part)
+        if normalized is not None:
+            return normalized
+    return None
+
+
+def normalize_method_name(value: str) -> str | None:
+    method_name = str(value).lower()
+    if "adapterfinetuning" in method_name or "adapter_finetuning" in method_name:
+        return "AdapterFinetuning"
+    if "prefixft" in method_name or "prefix" in method_name:
+        return "PrefixFT"
+    if "lora" in method_name:
+        return "LoRA"
+    return None
+
+
+def find_training_config_path(path: Path) -> Path | None:
+    start = path if path.is_dir() else path.parent
+    for directory in (start, *start.parents):
+        candidate = directory / TRAINING_CONFIG
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def read_yaml_config(path: Path) -> dict[str, Any]:
+    try:
+        import yaml
+    except ImportError as exc:
+        raise RuntimeError("YAML config loading requires pyyaml to be installed.") from exc
+
+    with open(path, encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+    if not isinstance(config, Mapping):
+        raise ValueError(f"Training config must be a YAML mapping: {path}")
+    return dict(config)
+
+
+def read_adapter_finetuning_config(path: Path) -> tuple[dict[str, Any], str | None]:
+    training_config_path = find_training_config_path(path)
+    if training_config_path is None:
+        raise FileNotFoundError(
+            "AdapterFinetuning checkpoints require the training run config.yaml "
+            f"next to the log directory. Could not find it for: {path}"
+        )
+
+    training_config = read_yaml_config(training_config_path)
+    method_config = training_config.get("AdapterFinetuning")
+    if not isinstance(method_config, Mapping):
+        raise ValueError(
+            "Training config does not contain an AdapterFinetuning section: "
+            f"{training_config_path}"
+        )
+
+    global_config = training_config.get("global", {})
+    base_model = None
+    if isinstance(global_config, Mapping) and global_config.get("model_name"):
+        base_model = str(global_config["model_name"])
+    return dict(method_config), base_model
+
+
+def state_dict_has_adapter_finetuning_keys(path: Path) -> bool:
+    key_sources = []
+    for index_name in (SAFE_WEIGHTS_INDEX, PYTORCH_WEIGHTS_INDEX):
+        index_path = path / index_name
+        if index_path.is_file():
+            try:
+                weight_map = read_json(index_path).get("weight_map", {})
+            except (OSError, json.JSONDecodeError):
+                weight_map = {}
+            key_sources.append(weight_map.keys())
+
+    direct_safe_weights = path / SAFE_WEIGHTS
+    if direct_safe_weights.is_file():
+        try:
+            from safetensors import safe_open
+
+            with safe_open(str(direct_safe_weights), framework="pt", device="cpu") as f:
+                key_sources.append(f.keys())
+        except ImportError:
+            pass
+
+    return any(
+        ".adapter." in key or key.endswith(".adapter.gate")
+        for keys in key_sources
+        for key in keys
+    )
+
+
+def adapter_info(adapter_spec: AdapterLoadSpec | None) -> dict:
+    if adapter_spec is None:
         return {}
 
-    config_path = Path(adapter_path) / "adapter_config.json"
-    with open(config_path, encoding="utf-8") as f:
-        config = json.load(f)
     return {
-        "peft_type": config.get("peft_type", "unknown"),
-        "base_model_name_or_path": config.get("base_model_name_or_path"),
-        "path": adapter_path,
+        "type": adapter_spec.method_name or adapter_spec.kind,
+        "base_model_name_or_path": adapter_spec.base_model_name_or_path,
+        "path": str(adapter_spec.path),
     }
 
 
@@ -135,6 +363,16 @@ def adapter_sort_key(path: Path) -> tuple[int, int, float, str]:
     numbers = re.findall(r"\d+", path.name)
     last_number = int(numbers[-1]) if numbers else -1
     return (int(bool(numbers)), last_number, path.stat().st_mtime, str(path))
+
+
+def selected_model_name(model_name: str, adapter_spec: AdapterLoadSpec | None) -> str:
+    if (
+        adapter_spec is not None
+        and adapter_spec.base_model_name_or_path
+        and model_name == DEFAULT_MODEL_NAME
+    ):
+        return adapter_spec.base_model_name_or_path
+    return model_name
 
 
 def select_dtype(dtype: str, device: str):
@@ -157,20 +395,138 @@ def setup_tokenizer(model_path: str):
     return tokenizer
 
 
-def load_model(model_path: str, adapter_path: str | None, dtype, device: str):
+def load_model(
+    model_path: str,
+    adapter_spec: AdapterLoadSpec | None,
+    dtype,
+    device: str,
+):
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
         torch_dtype=dtype,
         trust_remote_code=True,
     )
-    if adapter_path is not None:
-        model = PeftModel.from_pretrained(model, adapter_path)
+    if adapter_spec is not None:
+        if adapter_spec.kind == "peft":
+            model = PeftModel.from_pretrained(model, str(adapter_spec.path))
+        elif adapter_spec.kind == "adapter_finetuning":
+            model = load_adapter_finetuning_checkpoint(model, adapter_spec)
+        else:
+            raise ValueError(f"Unsupported adapter checkpoint type: {adapter_spec.kind}")
 
     model.to(device)
     model.eval()
     if hasattr(model.config, "use_cache"):
         model.config.use_cache = True
     return model
+
+
+def load_adapter_finetuning_checkpoint(model, adapter_spec: AdapterLoadSpec):
+    if adapter_spec.method_config is None:
+        raise ValueError("AdapterFinetuning checkpoint is missing method config.")
+
+    if str(TRAIN_DIR) not in sys.path:
+        sys.path.insert(0, str(TRAIN_DIR))
+    from utils.AdapterFinetuningLayer import AdapterFinetuningMethod
+
+    model = AdapterFinetuningMethod(adapter_spec.method_config).apply(model)
+    load_checkpoint_weights(model, adapter_spec.path)
+    return model
+
+
+def load_checkpoint_weights(model, checkpoint_dir: Path) -> None:
+    index_path = first_existing(
+        checkpoint_dir,
+        (SAFE_WEIGHTS_INDEX, PYTORCH_WEIGHTS_INDEX),
+    )
+    if index_path is not None:
+        if try_transformers_sharded_load(model, checkpoint_dir):
+            return
+        load_sharded_state_dict(model, checkpoint_dir, index_path)
+        return
+
+    weights_path = first_existing(checkpoint_dir, (SAFE_WEIGHTS, PYTORCH_WEIGHTS))
+    if weights_path is None:
+        raise FileNotFoundError(f"No model weights found in checkpoint: {checkpoint_dir}")
+
+    state_dict = load_weight_file(weights_path)
+    incompatible = model.load_state_dict(state_dict, strict=False)
+    report_incompatible_keys(incompatible)
+
+
+def first_existing(directory: Path, names: tuple[str, ...]) -> Path | None:
+    for name in names:
+        path = directory / name
+        if path.is_file():
+            return path
+    return None
+
+
+def try_transformers_sharded_load(model, checkpoint_dir: Path) -> bool:
+    try:
+        from transformers.modeling_utils import load_sharded_checkpoint
+    except ImportError:
+        return False
+
+    try:
+        incompatible = load_sharded_checkpoint(
+            model,
+            str(checkpoint_dir),
+            strict=False,
+            prefer_safe=True,
+        )
+    except TypeError:
+        incompatible = load_sharded_checkpoint(
+            model,
+            str(checkpoint_dir),
+            strict=False,
+        )
+    report_incompatible_keys(incompatible)
+    return True
+
+
+def load_sharded_state_dict(model, checkpoint_dir: Path, index_path: Path) -> None:
+    index = read_json(index_path)
+    weight_map = index.get("weight_map")
+    if not isinstance(weight_map, Mapping):
+        raise ValueError(f"Invalid sharded checkpoint index: {index_path}")
+
+    shard_names = sorted(set(weight_map.values()))
+    for shard_name in shard_names:
+        shard_path = checkpoint_dir / shard_name
+        state_dict = load_weight_file(shard_path)
+        incompatible = model.load_state_dict(state_dict, strict=False)
+        report_incompatible_keys(incompatible, report_missing=False)
+
+
+def load_weight_file(path: Path) -> dict[str, torch.Tensor]:
+    if path.suffix == ".safetensors":
+        try:
+            from safetensors.torch import load_file
+        except ImportError as exc:
+            raise RuntimeError(
+                "Loading safetensors checkpoints requires safetensors to be installed."
+            ) from exc
+        return load_file(str(path), device="cpu")
+
+    state_dict = torch.load(str(path), map_location="cpu")
+    if isinstance(state_dict, Mapping) and "state_dict" in state_dict:
+        state_dict = state_dict["state_dict"]
+    if not isinstance(state_dict, Mapping):
+        raise ValueError(f"Checkpoint file did not contain a state dict: {path}")
+    return dict(state_dict)
+
+
+def report_incompatible_keys(incompatible, report_missing: bool = True) -> None:
+    if incompatible is None:
+        return
+
+    missing_keys = list(getattr(incompatible, "missing_keys", []) or [])
+    unexpected_keys = list(getattr(incompatible, "unexpected_keys", []) or [])
+    if report_missing and missing_keys:
+        print(f"Warning: {len(missing_keys)} checkpoint keys were missing in the model.")
+    if unexpected_keys:
+        print(f"Warning: {len(unexpected_keys)} checkpoint keys were unexpected.")
 
 
 def build_prompt(tokenizer, messages: list[dict[str, str]]) -> str:
@@ -285,18 +641,24 @@ def chat_loop(model, tokenizer, args) -> None:
 
 def main():
     args = argparser()
-    model_path = resolve_model_path(args.model_name)
-    adapter_path = resolve_adapter_path(args.adapter_path)
-    peft_adapter_info = adapter_info(adapter_path)
+    adapter_spec = resolve_adapter_checkpoint(args.adapter_path)
+    model_name = selected_model_name(args.model_name, adapter_spec)
+    model_path = resolve_model_path(model_name)
+    adapter_metadata = adapter_info(adapter_spec)
     dtype = select_dtype(args.dtype, args.device)
 
     print("=" * 60)
     print("Course QA Assistant Eval")
     print("=" * 60)
     print(f"Base model: {model_path}")
-    print(f"PEFT adapter: {adapter_path if adapter_path else 'None'}")
-    if peft_adapter_info:
-        print(f"PEFT type: {peft_adapter_info['peft_type']}")
+    print(
+        "Adapter/checkpoint: "
+        f"{adapter_metadata['path'] if adapter_metadata else 'None'}"
+    )
+    if adapter_metadata:
+        print(f"Adapter type: {adapter_metadata['type']}")
+        if adapter_metadata.get("base_model_name_or_path"):
+            print(f"Adapter base model: {adapter_metadata['base_model_name_or_path']}")
     print(f"Device: {args.device}")
     print(f"Dtype: {dtype}")
 
@@ -304,9 +666,9 @@ def main():
     print(f"Tokenizer EOS ID: {tokenizer.eos_token_id} ({tokenizer.eos_token})")
 
     print("\nLoading model...")
-    model = load_model(model_path, adapter_path, dtype, args.device)
-    if adapter_path is not None:
-        print("PEFT adapter loaded.")
+    model = load_model(model_path, adapter_spec, dtype, args.device)
+    if adapter_spec is not None:
+        print("Adapter/checkpoint loaded.")
     print("Model loaded.")
 
     chat_loop(model, tokenizer, args)
