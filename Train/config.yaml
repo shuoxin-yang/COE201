@@ -13,7 +13,7 @@ global:
   num_epochs: 5
   batch_size: 3
   gradient_accumulation_steps: 4
-  learning_rate: 0.00005
+  learning_rate: 5e-5
   logging_steps: 10
   test_eval_epochs: 10
   save_steps: 10
@@ -34,3 +34,8 @@ PrefixFT:
   num_virtual_tokens: 20
   prefix_projection: false
   init_weights: true
+
+AdapterFinetuning:
+  target_modules: self_attn
+  adapter_len: 10
+  adapter_layers: 4

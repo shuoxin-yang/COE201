@@ -20,6 +20,7 @@ from transformers import (
     TrainerCallback,
     TrainingArguments,
 )
+from utils.AdapterFinetuningLayer import AdapterFinetuningMethod
 from utils.LoRALayer import LoRAFinetuneMethod
 from utils.PrefixFTLayer import PrefixFTFinetuneMethod
 from utils.data import load_qa_dataset
@@ -91,13 +92,26 @@ def normalize_method(method: Any) -> str:
         return "LoRA"
     if method_name in {"prefixft", "prefix", "prefix_tuning", "prefixtuning"}:
         return "PrefixFT"
-    raise ValueError("global.method must be either 'LoRA' or 'PrefixFT'.")
+    if method_name in {
+        "adapter",
+        "adapterft",
+        "adapter_finetuning",
+        "adapterfinetuning",
+        "adaption_prompt",
+        "adaptionprompt",
+        "llama_adapter",
+    }:
+        return "AdapterFinetuning"
+    raise ValueError(
+        "global.method must be one of 'LoRA', 'PrefixFT', or 'AdapterFinetuning'."
+    )
 
 
 def validate_config(config: Mapping[str, Any]) -> None:
     global_cfg = require_mapping(config, "global")
     lora_cfg = require_mapping(config, "LoRA")
     prefix_cfg = require_mapping(config, "PrefixFT")
+    adapter_cfg = require_mapping(config, "AdapterFinetuning")
 
     require_keys(
         global_cfg,
@@ -171,6 +185,18 @@ def validate_config(config: Mapping[str, Any]) -> None:
     if int(prefix_cfg["num_virtual_tokens"]) <= 0:
         raise ValueError("PrefixFT.num_virtual_tokens must be greater than 0.")
 
+    require_keys(
+        adapter_cfg,
+        ("target_modules", "adapter_len", "adapter_layers"),
+        "AdapterFinetuning",
+    )
+    if not str(adapter_cfg["target_modules"]).strip():
+        raise ValueError("AdapterFinetuning.target_modules must be a non-empty string.")
+    if int(adapter_cfg["adapter_len"]) <= 0:
+        raise ValueError("AdapterFinetuning.adapter_len must be greater than 0.")
+    if int(adapter_cfg["adapter_layers"]) <= 0:
+        raise ValueError("AdapterFinetuning.adapter_layers must be greater than 0.")
+
 
 def resolve_path(value: Any, config_dir: Path) -> str | None:
     if value is None:
@@ -215,6 +241,8 @@ def build_finetune_method(config: Mapping[str, Any]):
         return LoRAFinetuneMethod(require_mapping(config, "LoRA"))
     if method == "PrefixFT":
         return PrefixFTFinetuneMethod(require_mapping(config, "PrefixFT"))
+    if method == "AdapterFinetuning":
+        return AdapterFinetuningMethod(require_mapping(config, "AdapterFinetuning"))
     raise ValueError(f"Unsupported finetune method: {method}")
 
 

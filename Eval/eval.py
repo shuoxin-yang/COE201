@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 from pathlib import Path
 
@@ -22,10 +23,10 @@ def argparser():
         help="Base model path or model directory name under Project/model",
     )
     parser.add_argument(
-        "--lora_path",
+        "--adapter_path",
         type=str,
         default=None,
-        help="Optional PEFT LoRA adapter path. If omitted, only the base model is used.",
+        help="Optional PEFT adapter path. Supports LoRA, PrefixFT, and AdapterFinetuning checkpoints.",
     )
     parser.add_argument(
         "--system_prompt",
@@ -89,19 +90,19 @@ def resolve_model_path(model_name: str) -> str:
     return model_name
 
 
-def resolve_lora_path(lora_path: str | None) -> str | None:
-    if lora_path is None:
+def resolve_adapter_path(adapter_path: str | None) -> str | None:
+    if adapter_path is None:
         return None
 
-    path = Path(lora_path).expanduser()
+    path = Path(adapter_path).expanduser()
     if not path.exists():
-        project_path = PROJECT_ROOT / lora_path
+        project_path = PROJECT_ROOT / adapter_path
         if project_path.exists():
             path = project_path
     if not path.exists():
-        raise FileNotFoundError(f"LoRA adapter path does not exist: {lora_path}")
+        raise FileNotFoundError(f"PEFT adapter path does not exist: {adapter_path}")
     if path.is_file():
-        raise ValueError(f"LoRA adapter path must be a directory: {lora_path}")
+        raise ValueError(f"PEFT adapter path must be a directory: {adapter_path}")
     if (path / "adapter_config.json").is_file():
         return str(path)
 
@@ -111,9 +112,23 @@ def resolve_lora_path(lora_path: str | None) -> str | None:
     )
     if not adapter_configs:
         raise FileNotFoundError(
-            f"No adapter_config.json found under LoRA path: {lora_path}"
+            f"No adapter_config.json found under PEFT adapter path: {adapter_path}"
         )
     return str(adapter_configs[-1].parent)
+
+
+def adapter_info(adapter_path: str | None) -> dict:
+    if adapter_path is None:
+        return {}
+
+    config_path = Path(adapter_path) / "adapter_config.json"
+    with open(config_path, encoding="utf-8") as f:
+        config = json.load(f)
+    return {
+        "peft_type": config.get("peft_type", "unknown"),
+        "base_model_name_or_path": config.get("base_model_name_or_path"),
+        "path": adapter_path,
+    }
 
 
 def adapter_sort_key(path: Path) -> tuple[int, int, float, str]:
@@ -142,14 +157,14 @@ def setup_tokenizer(model_path: str):
     return tokenizer
 
 
-def load_model(model_path: str, lora_path: str | None, dtype, device: str):
+def load_model(model_path: str, adapter_path: str | None, dtype, device: str):
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
         torch_dtype=dtype,
         trust_remote_code=True,
     )
-    if lora_path is not None:
-        model = PeftModel.from_pretrained(model, lora_path)
+    if adapter_path is not None:
+        model = PeftModel.from_pretrained(model, adapter_path)
 
     model.to(device)
     model.eval()
@@ -271,14 +286,17 @@ def chat_loop(model, tokenizer, args) -> None:
 def main():
     args = argparser()
     model_path = resolve_model_path(args.model_name)
-    lora_path = resolve_lora_path(args.lora_path)
+    adapter_path = resolve_adapter_path(args.adapter_path)
+    peft_adapter_info = adapter_info(adapter_path)
     dtype = select_dtype(args.dtype, args.device)
 
     print("=" * 60)
     print("Course QA Assistant Eval")
     print("=" * 60)
     print(f"Base model: {model_path}")
-    print(f"LoRA adapter: {lora_path if lora_path else 'None'}")
+    print(f"PEFT adapter: {adapter_path if adapter_path else 'None'}")
+    if peft_adapter_info:
+        print(f"PEFT type: {peft_adapter_info['peft_type']}")
     print(f"Device: {args.device}")
     print(f"Dtype: {dtype}")
 
@@ -286,9 +304,9 @@ def main():
     print(f"Tokenizer EOS ID: {tokenizer.eos_token_id} ({tokenizer.eos_token})")
 
     print("\nLoading model...")
-    model = load_model(model_path, lora_path, dtype, args.device)
-    if lora_path is not None:
-        print("LoRA adapter loaded.")
+    model = load_model(model_path, adapter_path, dtype, args.device)
+    if adapter_path is not None:
+        print("PEFT adapter loaded.")
     print("Model loaded.")
 
     chat_loop(model, tokenizer, args)
