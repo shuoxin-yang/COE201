@@ -106,18 +106,56 @@ def _validate_qa_columns(
         )
 
 
-def _validate_test_size(test_size: float, dataset_len: int) -> None:
-    if test_size < 0 or test_size >= 1:
-        raise ValueError("--test_size must be in [0, 1). Use 0 to disable eval split.")
-    if dataset_len < 2 and test_size > 0:
-        raise ValueError("Need at least 2 samples when --test_size is greater than 0.")
+def _validate_split_size(name: str, value: float) -> None:
+    if value < 0 or value > 1:
+        raise ValueError(f"--{name} must be in [0, 1].")
+
+
+def _validate_split_proportions(
+    train_size: float,
+    eval_size: float,
+    test_size: float,
+) -> None:
+    for name, value in (
+        ("train_size", train_size),
+        ("eval_size", eval_size),
+        ("test_size", test_size),
+    ):
+        _validate_split_size(name, value)
+    if train_size <= 0:
+        raise ValueError("--train_size must be greater than 0.")
+    if eval_size <= 0:
+        raise ValueError("--eval_size must be greater than 0 for epoch eval.")
+
+    total = train_size + eval_size + test_size
+    if abs(total - 1.0) > 1e-6:
+        raise ValueError(
+            "--train_size, --eval_size, and --test_size must sum to 1.0."
+        )
+
+
+def _validate_split_lengths(
+    train_eval_len: int,
+    test_len: int | None,
+    eval_size: float,
+) -> None:
+    if test_len is not None and test_len <= 0:
+        raise ValueError("The fixed test split is empty. Decrease --test_size.")
+    if train_eval_len <= 0:
+        raise ValueError("The train/eval pool is empty. Decrease --test_size.")
+    if eval_size > 0 and train_eval_len < 2:
+        raise ValueError(
+            "Need at least 2 samples in the train/eval pool when --eval_size is greater than 0."
+        )
 
 
 def load_qa_dataset(
     path: str,
     tokenizer: PreTrainedTokenizerBase,
     max_length: int = 2048,
-    test_size: float = 0.1,
+    train_size: float = 0.7,
+    eval_size: float = 0.1,
+    test_size: float = 0.2,
     seed: int = 42,
     question_field: str = "question",
     answer_field: str = "answer",
@@ -126,7 +164,7 @@ def load_qa_dataset(
     system_prompt: str = DEFAULT_QA_SYSTEM_PROMPT,
     data_format: str = "json",
 ) -> DatasetDict:
-    """Load QA json/jsonl file(s) and return tokenized train/test splits for Qwen SFT."""
+    """Load QA json/jsonl file(s) and return tokenized train/eval pool and fixed test split."""
     if path is None:
         raise ValueError("path must be provided.")
     if tokenizer is None:
@@ -137,7 +175,7 @@ def load_qa_dataset(
     data_files = _resolve_data_files(path)
     raw_dataset = hf_load_dataset(data_format, data_files=data_files)["train"]
     _validate_qa_columns(raw_dataset.column_names, question_field, answer_field)
-    _validate_test_size(test_size, len(raw_dataset))
+    _validate_split_proportions(train_size, eval_size, test_size)
     use_type = (
         include_type_in_prompt
         and type_field is not None
@@ -145,13 +183,24 @@ def load_qa_dataset(
     )
 
     if test_size > 0:
-        raw_splits = raw_dataset.train_test_split(
+        fixed_test_split = raw_dataset.train_test_split(
             test_size=test_size,
             seed=seed,
             shuffle=True,
         )
+        raw_splits = DatasetDict(
+            {
+                "train_eval": fixed_test_split["train"],
+                "test": fixed_test_split["test"],
+            }
+        )
     else:
-        raw_splits = DatasetDict({"train": raw_dataset})
+        raw_splits = DatasetDict({"train_eval": raw_dataset})
+    _validate_split_lengths(
+        train_eval_len=len(raw_splits["train_eval"]),
+        test_len=len(raw_splits["test"]) if "test" in raw_splits else None,
+        eval_size=eval_size,
+    )
 
     def tokenize_fn(examples: dict[str, list[Any]]) -> dict[str, list[list[int]]]:
         input_ids_list = []

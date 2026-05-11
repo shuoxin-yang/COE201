@@ -1,0 +1,36 @@
+global:
+  method: LoRA
+  model_name: Qwen3.5-4B
+  run_name: ""
+  train_data_path: ../QA_Gen/data/ProcessedQA/filtered_scored_output.jsonl
+  max_length: 2048
+  train_size: 0.7
+  eval_size: 0.1
+  test_size: 0.2
+  seed: 42
+  output_dir: ./logs
+  tensorboard_logdir: ~/tf-logs
+  num_epochs: 5
+  batch_size: 3
+  gradient_accumulation_steps: 4
+  learning_rate: 0.00005
+  logging_steps: 10
+  test_eval_epochs: 10
+  save_steps: 10
+  save_total_limit: 5
+
+LoRA:
+  rank: 8
+  alpha: 16
+  scaling_type: r/a
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+  init_lora_weights: gaussian
+
+PrefixFT:
+  num_virtual_tokens: 20
+  prefix_projection: false
+  init_weights: true

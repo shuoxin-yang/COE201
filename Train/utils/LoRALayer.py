@@ -1,31 +1,36 @@
-import torch
-import torch.nn as nn
-import numpy as np
-from typing import Literal
+from __future__ import annotations
 
-class LoRA(nn.Module):
-    def __init__(self, original_layer: nn.Linear, rank=4, alpha=1.0, scaling_type: Literal["r/a", "r/sqrta"] = "r/a"):
-        super().__init__()
-        self.original_layer = original_layer
-        self.original_layer.requires_grad_(False)
-        self.rank = rank
-        self.alpha = alpha
-        if scaling_type == "r/a":
-            self.scaling = alpha / rank
-        elif scaling_type == "r/sqrta":
-            self.scaling = alpha / np.sqrt(rank)
-        self.lora_A=nn.Parameter(torch.empty((rank, original_layer.in_features)))
-        self.lora_B=nn.Parameter(torch.zeros((original_layer.out_features, rank)))
-        nn.init.kaiming_uniform_(self.lora_A)
-        
-    def forward(self, x):
-        return self.original_layer(x) + (self.lora_B @ self.lora_A @ x.T).T * self.scaling
-    
+from collections.abc import Mapping
+from typing import Any
 
-def inject_lora(model: nn.Module, rank=4, alpha=1.0, scaling_type: Literal["r/a", "r/sqrta"] = "r/a") -> nn.Module:
-    for name, module in model.named_children():
-        if isinstance(module, nn.Linear):
-            setattr(model, name, LoRA(module, rank=rank, alpha=alpha, scaling_type=scaling_type))
-        else:
-            inject_lora(module, rank=rank, alpha=alpha, scaling_type=scaling_type)
-    return model
+from peft import LoraConfig, TaskType
+
+from .FinetuneMethod import FinetuneMethod
+
+
+class LoRAFinetuneMethod(FinetuneMethod):
+    method_name = "LoRA"
+
+    def __init__(self, config: Mapping[str, Any]):
+        super().__init__(config)
+        self.rank = int(self.config["rank"])
+        self.alpha = float(self.config["alpha"])
+        self.scaling_type = str(self.config.get("scaling_type", "r/a"))
+        self.target_modules = list(self.config["target_modules"])
+        self.init_lora_weights = self.config.get("init_lora_weights", "gaussian")
+
+    def build_config(self) -> LoraConfig:
+        return LoraConfig(
+            r=self.rank,
+            lora_alpha=self.alpha,
+            init_lora_weights=self.init_lora_weights,
+            target_modules=self.target_modules,
+            task_type=TaskType.CAUSAL_LM,
+            use_rslora=(self.scaling_type == "r/sqrta"),
+        )
+
+    def default_run_name(self) -> str:
+        return (
+            f"lora_r={self.rank}_alpha={self.alpha}_"
+            f"scaling={self.scaling_type}"
+        )
