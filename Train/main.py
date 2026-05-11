@@ -49,6 +49,17 @@ def format_metrics(metrics: dict) -> dict:
     return formatted
 
 
+def count_trainable_parameters(model) -> tuple[int, int]:
+    trainable_params = 0
+    all_params = 0
+    for param in model.parameters():
+        num_params = param.numel()
+        all_params += num_params
+        if param.requires_grad:
+            trainable_params += num_params
+    return trainable_params, all_params
+
+
 def argparser():
     parser = argparse.ArgumentParser(description="PEFT fine-tuning entrypoint")
     parser.add_argument(
@@ -337,6 +348,50 @@ def resolve_model_path(model_name: str, config_dir: Path) -> str:
     raise FileNotFoundError(
         f"Model directory does not exist. Checked: {[str(path) for path in candidates]}"
     )
+
+
+def iter_model_configs(model) -> list[Any]:
+    configs = []
+    seen = set()
+    candidates = [
+        getattr(model, "config", None),
+        getattr(getattr(model, "base_model", None), "config", None),
+        getattr(getattr(model, "model", None), "config", None),
+    ]
+    for config in candidates:
+        if config is None or id(config) in seen:
+            continue
+        configs.append(config)
+        seen.add(id(config))
+        text_config = getattr(config, "text_config", None)
+        if text_config is not None and id(text_config) not in seen:
+            configs.append(text_config)
+            seen.add(id(text_config))
+    return configs
+
+
+def disable_model_cache(model) -> None:
+    for config in iter_model_configs(model):
+        if hasattr(config, "use_cache"):
+            config.use_cache = False
+
+
+def model_has_linear_attention(model) -> bool:
+    for config in iter_model_configs(model):
+        layer_types = getattr(config, "layer_types", None)
+        if layer_types and "linear_attention" in layer_types:
+            return True
+    return False
+
+
+def validate_method_model_compatibility(finetune_method, model) -> None:
+    if finetune_method.method_name == "PrefixFT" and model_has_linear_attention(model):
+        raise RuntimeError(
+            "PrefixFT is incompatible with this model's linear_attention layers. "
+            "Prefix tuning passes past_key_values, but Qwen3.5 linear attention "
+            "expects a linear-attention cache. Use --method LoRA or "
+            "--method AdapterFinetuning for this model."
+        )
 
 
 def completed_epoch(state) -> int | None:
@@ -668,8 +723,11 @@ def main():
     model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=dtype).to(
         device
     )
+    disable_model_cache(model)
+    validate_method_model_compatibility(finetune_method, model)
     model = finetune_method.apply(model).to(device)
-    trainable_params, all_param = model.get_nb_trainable_parameters()
+    disable_model_cache(model)
+    trainable_params, all_param = count_trainable_parameters(model)
     logger.logandprint(f"finetune method: {finetune_method.method_name}")
     logger.logandprint(
         f"trainable params: {trainable_params:,d} || "
@@ -733,7 +791,7 @@ def main():
     )
     if fixed_test_callback is not None:
         fixed_test_callback.trainer = trainer
-    model.config.use_cache = False
+    disable_model_cache(model)
 
     train_result = trainer.train()
     train_metrics = dict(train_result.metrics)
