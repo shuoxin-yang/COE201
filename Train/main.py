@@ -30,6 +30,12 @@ from utils.log import Logger
 TRAIN_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = TRAIN_DIR.parent
 DEFAULT_CONFIG_PATH = TRAIN_DIR / "config.yaml"
+METHOD_TRAINING_KEYS = (
+    "num_epochs",
+    "batch_size",
+    "gradient_accumulation_steps",
+    "learning_rate",
+)
 
 
 def format_metrics(metrics: dict) -> dict:
@@ -50,6 +56,19 @@ def argparser():
         type=str,
         default=str(DEFAULT_CONFIG_PATH),
         help="Path to the YAML training config",
+    )
+    parser.add_argument(
+        "--method",
+        type=normalize_method,
+        choices=("LoRA", "PrefixFT", "AdapterFinetuning"),
+        required=True,
+        help="Fine-tuning method: LoRA, PrefixFT, or AdapterFinetuning",
+    )
+    parser.add_argument(
+        "--run-name",
+        type=str,
+        default="",
+        help="Optional run name appended to the log directory",
     )
     return parser.parse_args()
 
@@ -103,11 +122,23 @@ def normalize_method(method: Any) -> str:
     }:
         return "AdapterFinetuning"
     raise ValueError(
-        "global.method must be one of 'LoRA', 'PrefixFT', or 'AdapterFinetuning'."
+        "--method must be one of 'LoRA', 'PrefixFT', or 'AdapterFinetuning'."
     )
 
 
-def validate_config(config: Mapping[str, Any]) -> None:
+def validate_training_config(config: Mapping[str, Any], section: str) -> None:
+    require_keys(config, METHOD_TRAINING_KEYS, section)
+    if int(config["num_epochs"]) < 1:
+        raise ValueError(f"{section}.num_epochs must be at least 1.")
+    if int(config["batch_size"]) < 1:
+        raise ValueError(f"{section}.batch_size must be at least 1.")
+    if int(config["gradient_accumulation_steps"]) < 1:
+        raise ValueError(f"{section}.gradient_accumulation_steps must be at least 1.")
+    if float(config["learning_rate"]) <= 0:
+        raise ValueError(f"{section}.learning_rate must be greater than 0.")
+
+
+def validate_config(config: Mapping[str, Any], method: str) -> None:
     global_cfg = require_mapping(config, "global")
     lora_cfg = require_mapping(config, "LoRA")
     prefix_cfg = require_mapping(config, "PrefixFT")
@@ -116,9 +147,7 @@ def validate_config(config: Mapping[str, Any]) -> None:
     require_keys(
         global_cfg,
         (
-            "method",
             "model_name",
-            "run_name",
             "train_data_path",
             "max_length",
             "train_size",
@@ -127,10 +156,6 @@ def validate_config(config: Mapping[str, Any]) -> None:
             "seed",
             "output_dir",
             "tensorboard_logdir",
-            "num_epochs",
-            "batch_size",
-            "gradient_accumulation_steps",
-            "learning_rate",
             "logging_steps",
             "test_eval_epochs",
             "save_steps",
@@ -138,9 +163,6 @@ def validate_config(config: Mapping[str, Any]) -> None:
         ),
         "global",
     )
-    normalize_method(global_cfg["method"])
-    if int(global_cfg["num_epochs"]) < 1:
-        raise ValueError("global.num_epochs must be at least 1.")
     if int(global_cfg["test_eval_epochs"]) < 0:
         raise ValueError("global.test_eval_epochs must be greater than or equal to 0.")
 
@@ -176,6 +198,7 @@ def validate_config(config: Mapping[str, Any]) -> None:
         raise ValueError("LoRA.target_modules must be a non-empty list.")
     if str(lora_cfg["scaling_type"]) not in {"r/a", "r/sqrta"}:
         raise ValueError("LoRA.scaling_type must be either 'r/a' or 'r/sqrta'.")
+    validate_training_config(lora_cfg, "LoRA")
 
     require_keys(
         prefix_cfg,
@@ -184,6 +207,7 @@ def validate_config(config: Mapping[str, Any]) -> None:
     )
     if int(prefix_cfg["num_virtual_tokens"]) <= 0:
         raise ValueError("PrefixFT.num_virtual_tokens must be greater than 0.")
+    validate_training_config(prefix_cfg, "PrefixFT")
 
     require_keys(
         adapter_cfg,
@@ -196,6 +220,8 @@ def validate_config(config: Mapping[str, Any]) -> None:
         raise ValueError("AdapterFinetuning.adapter_len must be greater than 0.")
     if int(adapter_cfg["adapter_layers"]) <= 0:
         raise ValueError("AdapterFinetuning.adapter_layers must be greater than 0.")
+    validate_training_config(adapter_cfg, "AdapterFinetuning")
+    require_mapping(config, method)
 
 
 def resolve_path(value: Any, config_dir: Path) -> str | None:
@@ -207,25 +233,30 @@ def resolve_path(value: Any, config_dir: Path) -> str | None:
     return str(path.resolve())
 
 
-def build_global_args(config: Mapping[str, Any], config_path: Path) -> SimpleNamespace:
+def build_global_args(
+    config: Mapping[str, Any],
+    config_path: Path,
+    method: str,
+) -> SimpleNamespace:
     global_cfg = require_mapping(config, "global")
+    method_cfg = require_mapping(config, method)
     config_dir = config_path.parent
     resolved = dict(global_cfg)
-    resolved["method"] = normalize_method(global_cfg["method"])
+    resolved["method"] = method
     for key in (
         "max_length",
         "seed",
-        "num_epochs",
-        "batch_size",
-        "gradient_accumulation_steps",
         "logging_steps",
         "test_eval_epochs",
         "save_steps",
         "save_total_limit",
     ):
-        resolved[key] = int(global_cfg[key])
-    for key in ("train_size", "eval_size", "test_size", "learning_rate"):
+        resolved[key] = int(resolved[key])
+    for key in ("num_epochs", "batch_size", "gradient_accumulation_steps"):
+        resolved[key] = int(method_cfg[key])
+    for key in ("train_size", "eval_size", "test_size"):
         resolved[key] = float(global_cfg[key])
+    resolved["learning_rate"] = float(method_cfg["learning_rate"])
     resolved["train_data_path"] = resolve_path(global_cfg["train_data_path"], config_dir)
     resolved["output_dir"] = resolve_path(global_cfg["output_dir"], config_dir)
     resolved["tensorboard_logdir"] = resolve_path(
@@ -235,8 +266,7 @@ def build_global_args(config: Mapping[str, Any], config_path: Path) -> SimpleNam
     return SimpleNamespace(**resolved)
 
 
-def build_finetune_method(config: Mapping[str, Any]):
-    method = normalize_method(require_mapping(config, "global")["method"])
+def build_finetune_method(config: Mapping[str, Any], method: str):
     if method == "LoRA":
         return LoRAFinetuneMethod(require_mapping(config, "LoRA"))
     if method == "PrefixFT":
@@ -586,11 +616,13 @@ class ResplitTrainEvalCallback(TrainerCallback):
 
 def main():
     cli_args = argparser()
+    method = cli_args.method
     config, config_path = load_config(cli_args.config)
-    validate_config(config)
-    args = build_global_args(config, config_path)
-    finetune_method = build_finetune_method(config)
-    run_name = str(args.run_name).strip() or None
+    validate_config(config, method)
+    args = build_global_args(config, config_path, method)
+    finetune_method = build_finetune_method(config, method)
+    run_name = str(cli_args.run_name).strip() or None
+    args.run_name = run_name
     test_eval_epochs = resolve_test_eval_epochs(
         int(args.test_eval_epochs),
         int(args.num_epochs),
