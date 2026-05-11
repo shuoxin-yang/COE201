@@ -17,7 +17,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MODEL_ROOT = PROJECT_ROOT / "model"
 TRAIN_DIR = PROJECT_ROOT / "Train"
-DEFAULT_MODEL_NAME = "Qwen3.6-27B"
+DEFAULT_MODEL_NAME = "Qwen3.5-4B"
 PEFT_ADAPTER_CONFIG = "adapter_config.json"
 TRAINING_CONFIG = "config.yaml"
 SAFE_WEIGHTS = "model.safetensors"
@@ -581,6 +581,10 @@ def build_key_transform_candidates(model_keys: set[str]):
                 model_keys,
             ),
         ),
+        (
+            "unique suffix match",
+            lambda key: find_unique_suffix_match(key, model_keys),
+        ),
     ]
 
     candidates = []
@@ -635,6 +639,25 @@ def prefer_existing_key(
     return key
 
 
+def find_unique_suffix_match(key: str, model_keys: set[str]) -> str:
+    key_variants = (
+        key,
+        insert_adapter_module_key(key),
+        remove_adapter_module_key(key),
+    )
+    for key_variant in key_variants:
+        if key_variant in model_keys:
+            return key_variant
+
+        parts = key_variant.split(".")
+        for start in range(1, len(parts)):
+            suffix = ".".join(parts[start:])
+            matches = [model_key for model_key in model_keys if model_key.endswith(suffix)]
+            if len(matches) == 1:
+                return matches[0]
+    return key
+
+
 def load_transformed_state_dict(
     model,
     state_dict: Mapping[str, torch.Tensor],
@@ -671,10 +694,12 @@ def report_checkpoint_load(
         unexpected_examples = format_key_examples(
             [original for original, _ in unexpected_keys]
         )
+        missing_examples = format_key_examples(missing_keys)
         raise RuntimeError(
             "Checkpoint weights did not match the model at all. "
             f"Selected key transform: {transform_name}. "
-            f"Unexpected checkpoint key examples: {unexpected_examples}"
+            f"Unexpected checkpoint key examples: {unexpected_examples}. "
+            f"Model key examples: {missing_examples}"
         )
 
     if missing_keys:
