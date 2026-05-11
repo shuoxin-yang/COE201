@@ -6,7 +6,7 @@ import json
 import math
 import os
 import shutil
-from collections.abc import Mapping
+from collections.abc import Mapping, MutableMapping
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -81,7 +81,48 @@ def argparser():
         default="",
         help="Optional run name appended to the log directory",
     )
-    return parser.parse_args()
+    args, override_args = parser.parse_known_args()
+    try:
+        args.config_overrides = parse_config_overrides(override_args)
+    except ValueError as exc:
+        parser.error(str(exc))
+    return args
+
+
+def parse_override_value(raw_value: str) -> Any:
+    if raw_value == "":
+        return ""
+
+    try:
+        import yaml
+    except ImportError as exc:
+        raise RuntimeError("CLI config overrides require pyyaml to be installed.") from exc
+
+    return yaml.safe_load(raw_value)
+
+
+def parse_config_overrides(
+    override_args: list[str],
+) -> list[tuple[tuple[str, ...], Any]]:
+    overrides = []
+    for raw_arg in override_args:
+        if not raw_arg.startswith("--") or "=" not in raw_arg:
+            raise ValueError(
+                f"Unknown argument '{raw_arg}'. Config overrides must use "
+                "--section.key=value syntax, for example --LoRA.rank=16."
+            )
+
+        raw_path, raw_value = raw_arg[2:].split("=", 1)
+        key_path = tuple(raw_path.split("."))
+        if len(key_path) < 2 or any(not key for key in key_path):
+            raise ValueError(
+                f"Invalid config override '{raw_arg}'. Expected "
+                "--section.key=value syntax, for example --global.seed=43."
+            )
+
+        overrides.append((key_path, parse_override_value(raw_value)))
+
+    return overrides
 
 
 def load_config(config_path: str) -> tuple[dict[str, Any], Path]:
@@ -101,6 +142,46 @@ def load_config(config_path: str) -> tuple[dict[str, Any], Path]:
     if not isinstance(config, Mapping):
         raise ValueError(f"Config must be a YAML mapping: {path}")
     return dict(config), path
+
+
+def apply_config_overrides(
+    config: MutableMapping[str, Any],
+    overrides: list[tuple[tuple[str, ...], Any]],
+) -> list[dict[str, Any]]:
+    applied = []
+    for key_path, value in overrides:
+        path_text = ".".join(key_path)
+        cursor: MutableMapping[str, Any] = config
+
+        for depth, key in enumerate(key_path[:-1], start=1):
+            if key not in cursor:
+                missing_path = ".".join(key_path[:depth])
+                raise ValueError(
+                    f"Unknown config override '{path_text}': '{missing_path}' "
+                    "does not exist."
+                )
+
+            next_value = cursor[key]
+            if not isinstance(next_value, MutableMapping):
+                parent_path = ".".join(key_path[:depth])
+                raise ValueError(
+                    f"Invalid config override '{path_text}': '{parent_path}' "
+                    "is not a mapping."
+                )
+            cursor = next_value
+
+        final_key = key_path[-1]
+        if final_key not in cursor:
+            raise ValueError(
+                f"Unknown config override '{path_text}': key '{final_key}' "
+                "does not exist."
+            )
+
+        old_value = cursor[final_key]
+        cursor[final_key] = value
+        applied.append({"key": path_text, "old": old_value, "new": value})
+
+    return applied
 
 
 def require_mapping(config: Mapping[str, Any], key: str) -> dict[str, Any]:
@@ -287,9 +368,15 @@ def build_finetune_method(config: Mapping[str, Any], method: str):
     raise ValueError(f"Unsupported finetune method: {method}")
 
 
-def backup_config(config_path: Path, run_dir: str) -> str:
+def backup_config(config: Mapping[str, Any], run_dir: str) -> str:
+    try:
+        import yaml
+    except ImportError as exc:
+        raise RuntimeError("YAML config backup requires pyyaml to be installed.") from exc
+
     backup_path = Path(run_dir) / "config.yaml"
-    shutil.copy2(config_path, backup_path)
+    with open(backup_path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(dict(config), f, sort_keys=False, allow_unicode=True)
     return str(backup_path)
 
 
@@ -673,6 +760,7 @@ def main():
     cli_args = argparser()
     method = cli_args.method
     config, config_path = load_config(cli_args.config)
+    applied_overrides = apply_config_overrides(config, cli_args.config_overrides)
     validate_config(config, method)
     args = build_global_args(config, config_path, method)
     finetune_method = build_finetune_method(config, method)
@@ -688,7 +776,7 @@ def main():
         finetuning_type=finetune_method.method_name,
         tensorboard_logdir=args.tensorboard_logdir,
     )
-    config_backup_path = backup_config(config_path, logger.run_dir)
+    config_backup_path = backup_config(config, logger.run_dir)
     assert (
         torch.cuda.is_available() and torch.cuda.is_bf16_supported()
     ), "This script requires a GPU with bfloat16 support."
@@ -698,6 +786,7 @@ def main():
         "config_path": str(config_path),
         "config_backup_path": config_backup_path,
         "source_config": config,
+        "cli_overrides": applied_overrides,
         "resolved_global": vars(args).copy(),
         "active_method": finetune_method.method_name,
         "run_dir": logger.run_dir,
