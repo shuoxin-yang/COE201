@@ -30,6 +30,10 @@ COMMON_STATE_DICT_PREFIXES = (
     "base_model.model.",
     "model.",
 )
+COMMON_STATE_DICT_REPLACEMENTS = (
+    ("model.language_model.", "model."),
+    ("language_model.", "model."),
+)
 
 
 @dataclass(frozen=True)
@@ -568,6 +572,17 @@ def build_key_transform_candidates(model_keys: set[str]):
             )
         )
         prefix_ops.append((f"add '{prefix}'", lambda key, prefix=prefix: prefix + key))
+    for old_prefix, new_prefix in COMMON_STATE_DICT_REPLACEMENTS:
+        prefix_ops.append(
+            (
+                f"replace '{old_prefix}' with '{new_prefix}'",
+                lambda key, old_prefix=old_prefix, new_prefix=new_prefix: (
+                    new_prefix + key[len(old_prefix) :]
+                    if key.startswith(old_prefix)
+                    else key
+                ),
+            )
+        )
 
     wrapper_ops = [
         ("identity", lambda key: key),
