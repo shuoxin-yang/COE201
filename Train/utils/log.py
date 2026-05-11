@@ -13,24 +13,25 @@ class Logger:
         self,
         log_path: str | None = None,
         run_name: str | None = None,
+        finetuning_type: str | None = None,
         log_file: str | None = None,
         tensorboard_logdir: str | None = None,
     ):
         self.tensorboard_logdir = None
         self.tensorboard_writer = None
         if log_file is None:
-            if run_name is None and log_path and log_path.endswith(".txt"):
-                log_file = log_path
-            elif log_path is not None and run_name is not None:
-                run_dir_name = self._build_run_dir_name(run_name)
+            if log_path is not None and finetuning_type is not None:
+                run_dir_name = self._build_run_dir_name(finetuning_type, run_name)
                 self.run_dir_name = run_dir_name
                 self.run_dir = os.path.join(log_path, run_dir_name)
                 self.checkpoint_dir = os.path.join(self.run_dir, "checkpoints")
                 self.final_model_dir = os.path.join(self.checkpoint_dir, "model-final")
                 log_file = os.path.join(self.run_dir, "log.txt")
+            elif run_name is None and log_path and log_path.endswith(".txt"):
+                log_file = log_path
             else:
                 raise ValueError(
-                    "Either log_file or both log_path and run_name must be set."
+                    "Either log_file or both log_path and finetuning_type must be set."
                 )
         else:
             self.run_dir = os.path.dirname(log_file) or "."
@@ -52,11 +53,23 @@ class Logger:
         if tensorboard_logdir is not None:
             self._init_tensorboard(tensorboard_logdir)
 
-    def _build_run_dir_name(self, run_name: str) -> str:
+    def _build_run_dir_name(
+        self,
+        finetuning_type: str,
+        run_name: str | None = None,
+    ) -> str:
         timestamp = time.strftime("%Y%m%d_%H%M%S")
-        safe_run_name = re.sub(r"[\\/:\s]+", "_", run_name.strip())
-        safe_run_name = safe_run_name.strip("_") or "run"
-        return f"{timestamp}_{safe_run_name}"
+        parts = [
+            timestamp,
+            self._sanitize_run_dir_part(finetuning_type, fallback="finetuning"),
+        ]
+        if run_name is not None and str(run_name).strip():
+            parts.append(self._sanitize_run_dir_part(run_name, fallback="run"))
+        return "_".join(parts)
+
+    def _sanitize_run_dir_part(self, value: str, fallback: str) -> str:
+        safe_value = re.sub(r"[\\/:\s]+", "_", str(value).strip())
+        return safe_value.strip("_") or fallback
 
     def onlylog(self, message: Any, name: str | None = None) -> None:
         with open(self.log_file, "a") as f:

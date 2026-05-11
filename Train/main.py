@@ -246,6 +246,12 @@ def build_finetune_method(config: Mapping[str, Any]):
     raise ValueError(f"Unsupported finetune method: {method}")
 
 
+def backup_config(config_path: Path, run_dir: str) -> str:
+    backup_path = Path(run_dir) / "config.yaml"
+    shutil.copy2(config_path, backup_path)
+    return str(backup_path)
+
+
 def build_training_arguments(
     args: SimpleNamespace,
     logger: Logger,
@@ -584,7 +590,7 @@ def main():
     validate_config(config)
     args = build_global_args(config, config_path)
     finetune_method = build_finetune_method(config)
-    run_name = args.run_name if args.run_name else finetune_method.default_run_name()
+    run_name = str(args.run_name).strip() or None
     test_eval_epochs = resolve_test_eval_epochs(
         int(args.test_eval_epochs),
         int(args.num_epochs),
@@ -592,8 +598,10 @@ def main():
     logger = Logger(
         log_path=args.output_dir,
         run_name=run_name,
+        finetuning_type=finetune_method.method_name,
         tensorboard_logdir=args.tensorboard_logdir,
     )
+    config_backup_path = backup_config(config_path, logger.run_dir)
     assert (
         torch.cuda.is_available() and torch.cuda.is_bf16_supported()
     ), "This script requires a GPU with bfloat16 support."
@@ -601,6 +609,7 @@ def main():
 
     runtime_config = {
         "config_path": str(config_path),
+        "config_backup_path": config_backup_path,
         "source_config": config,
         "resolved_global": vars(args).copy(),
         "active_method": finetune_method.method_name,
