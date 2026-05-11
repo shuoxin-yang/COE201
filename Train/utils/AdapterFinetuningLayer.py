@@ -19,8 +19,13 @@ class BottleneckAdapter(nn.Module):
         nn.init.zeros_(self.up.weight)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        adapter_output = self.up(self.activation(self.down(hidden_states)))
-        return hidden_states + self.gate * adapter_output
+        hidden_dtype = hidden_states.dtype
+        adapter_dtype = self.down.weight.dtype
+        adapter_input = hidden_states.to(adapter_dtype)
+        adapter_output = self.up(self.activation(self.down(adapter_input)))
+        adapter_output = adapter_output.to(hidden_dtype)
+        gate = self.gate.to(hidden_dtype)
+        return hidden_states + gate * adapter_output
 
 
 class AdapterWrappedModule(nn.Module):
