@@ -24,6 +24,12 @@ SAFE_WEIGHTS = "model.safetensors"
 PYTORCH_WEIGHTS = "pytorch_model.bin"
 SAFE_WEIGHTS_INDEX = "model.safetensors.index.json"
 PYTORCH_WEIGHTS_INDEX = "pytorch_model.bin.index.json"
+COMMON_STATE_DICT_PREFIXES = (
+    "module.",
+    "_orig_mod.",
+    "base_model.model.",
+    "model.",
+)
 
 
 @dataclass(frozen=True)
@@ -435,14 +441,13 @@ def load_adapter_finetuning_checkpoint(model, adapter_spec: AdapterLoadSpec):
 
 
 def load_checkpoint_weights(model, checkpoint_dir: Path) -> None:
+    model_keys = set(model.state_dict().keys())
     index_path = first_existing(
         checkpoint_dir,
         (SAFE_WEIGHTS_INDEX, PYTORCH_WEIGHTS_INDEX),
     )
     if index_path is not None:
-        if try_transformers_sharded_load(model, checkpoint_dir):
-            return
-        load_sharded_state_dict(model, checkpoint_dir, index_path)
+        load_sharded_state_dict(model, checkpoint_dir, index_path, model_keys)
         return
 
     weights_path = first_existing(checkpoint_dir, (SAFE_WEIGHTS, PYTORCH_WEIGHTS))
@@ -450,8 +455,22 @@ def load_checkpoint_weights(model, checkpoint_dir: Path) -> None:
         raise FileNotFoundError(f"No model weights found in checkpoint: {checkpoint_dir}")
 
     state_dict = load_weight_file(weights_path)
-    incompatible = model.load_state_dict(state_dict, strict=False)
-    report_incompatible_keys(incompatible)
+    key_transform, transform_name = select_key_transform(
+        model_keys=model_keys,
+        checkpoint_keys=state_dict.keys(),
+    )
+    loaded_keys, unexpected_keys = load_transformed_state_dict(
+        model=model,
+        state_dict=state_dict,
+        model_keys=model_keys,
+        key_transform=key_transform,
+    )
+    report_checkpoint_load(
+        model_keys=model_keys,
+        loaded_keys=loaded_keys,
+        unexpected_keys=unexpected_keys,
+        transform_name=transform_name,
+    )
 
 
 def first_existing(directory: Path, names: tuple[str, ...]) -> Path | None:
@@ -462,41 +481,42 @@ def first_existing(directory: Path, names: tuple[str, ...]) -> Path | None:
     return None
 
 
-def try_transformers_sharded_load(model, checkpoint_dir: Path) -> bool:
-    try:
-        from transformers.modeling_utils import load_sharded_checkpoint
-    except ImportError:
-        return False
-
-    try:
-        incompatible = load_sharded_checkpoint(
-            model,
-            str(checkpoint_dir),
-            strict=False,
-            prefer_safe=True,
-        )
-    except TypeError:
-        incompatible = load_sharded_checkpoint(
-            model,
-            str(checkpoint_dir),
-            strict=False,
-        )
-    report_incompatible_keys(incompatible)
-    return True
-
-
-def load_sharded_state_dict(model, checkpoint_dir: Path, index_path: Path) -> None:
+def load_sharded_state_dict(
+    model,
+    checkpoint_dir: Path,
+    index_path: Path,
+    model_keys: set[str],
+) -> None:
     index = read_json(index_path)
     weight_map = index.get("weight_map")
     if not isinstance(weight_map, Mapping):
         raise ValueError(f"Invalid sharded checkpoint index: {index_path}")
 
+    key_transform, transform_name = select_key_transform(
+        model_keys=model_keys,
+        checkpoint_keys=weight_map.keys(),
+    )
+    loaded_keys = set()
+    unexpected_keys = []
     shard_names = sorted(set(weight_map.values()))
     for shard_name in shard_names:
         shard_path = checkpoint_dir / shard_name
         state_dict = load_weight_file(shard_path)
-        incompatible = model.load_state_dict(state_dict, strict=False)
-        report_incompatible_keys(incompatible, report_missing=False)
+        shard_loaded_keys, shard_unexpected_keys = load_transformed_state_dict(
+            model=model,
+            state_dict=state_dict,
+            model_keys=model_keys,
+            key_transform=key_transform,
+        )
+        loaded_keys.update(shard_loaded_keys)
+        unexpected_keys.extend(shard_unexpected_keys)
+
+    report_checkpoint_load(
+        model_keys=model_keys,
+        loaded_keys=loaded_keys,
+        unexpected_keys=unexpected_keys,
+        transform_name=transform_name,
+    )
 
 
 def load_weight_file(path: Path) -> dict[str, torch.Tensor]:
@@ -517,16 +537,163 @@ def load_weight_file(path: Path) -> dict[str, torch.Tensor]:
     return dict(state_dict)
 
 
-def report_incompatible_keys(incompatible, report_missing: bool = True) -> None:
-    if incompatible is None:
-        return
+def select_key_transform(
+    model_keys: set[str],
+    checkpoint_keys,
+):
+    candidates = build_key_transform_candidates(model_keys)
+    scores = []
+    for name, transform in candidates:
+        matched = sum(1 for key in checkpoint_keys if transform(key) in model_keys)
+        scores.append((matched, name, transform))
 
-    missing_keys = list(getattr(incompatible, "missing_keys", []) or [])
-    unexpected_keys = list(getattr(incompatible, "unexpected_keys", []) or [])
-    if report_missing and missing_keys:
-        print(f"Warning: {len(missing_keys)} checkpoint keys were missing in the model.")
+    matched, transform_name, key_transform = max(scores, key=lambda item: item[0])
+    if transform_name != "identity":
+        print(
+            "Checkpoint key transform: "
+            f"{transform_name} ({matched} matched tensors)."
+        )
+    return key_transform, transform_name
+
+
+def build_key_transform_candidates(model_keys: set[str]):
+    prefix_ops = [("identity", lambda key: key)]
+    for prefix in COMMON_STATE_DICT_PREFIXES:
+        prefix_ops.append(
+            (
+                f"strip '{prefix}'",
+                lambda key, prefix=prefix: key[len(prefix) :]
+                if key.startswith(prefix)
+                else key,
+            )
+        )
+        prefix_ops.append((f"add '{prefix}'", lambda key, prefix=prefix: prefix + key))
+
+    wrapper_ops = [
+        ("identity", lambda key: key),
+        ("insert adapter module wrapper", insert_adapter_module_key),
+        ("remove adapter module wrapper", remove_adapter_module_key),
+        (
+            "prefer existing adapter module wrapper",
+            lambda key: prefer_existing_key(
+                key,
+                (insert_adapter_module_key(key), remove_adapter_module_key(key)),
+                model_keys,
+            ),
+        ),
+    ]
+
+    candidates = []
+    for prefix_name, prefix_op in prefix_ops:
+        for wrapper_name, wrapper_op in wrapper_ops:
+            if prefix_name == "identity" and wrapper_name == "identity":
+                name = "identity"
+            elif prefix_name == "identity":
+                name = wrapper_name
+            elif wrapper_name == "identity":
+                name = prefix_name
+            else:
+                name = f"{prefix_name} + {wrapper_name}"
+            candidates.append(
+                (
+                    name,
+                    lambda key, prefix_op=prefix_op, wrapper_op=wrapper_op: wrapper_op(
+                        prefix_op(key)
+                    ),
+                )
+            )
+    return candidates
+
+
+def insert_adapter_module_key(key: str) -> str:
+    marker = ".self_attn."
+    wrapped_marker = ".self_attn.module."
+    adapter_marker = ".self_attn.adapter."
+    if (
+        marker in key
+        and wrapped_marker not in key
+        and adapter_marker not in key
+    ):
+        return key.replace(marker, wrapped_marker, 1)
+    return key
+
+
+def remove_adapter_module_key(key: str) -> str:
+    return key.replace(".self_attn.module.", ".self_attn.", 1)
+
+
+def prefer_existing_key(
+    key: str,
+    candidates: tuple[str, ...],
+    model_keys: set[str],
+) -> str:
+    if key in model_keys:
+        return key
+    for candidate in candidates:
+        if candidate in model_keys:
+            return candidate
+    return key
+
+
+def load_transformed_state_dict(
+    model,
+    state_dict: Mapping[str, torch.Tensor],
+    model_keys: set[str],
+    key_transform,
+) -> tuple[set[str], list[tuple[str, str]]]:
+    transformed_state_dict = {}
+    unexpected_keys = []
+    for key, value in state_dict.items():
+        transformed_key = key_transform(key)
+        if transformed_key in model_keys:
+            transformed_state_dict[transformed_key] = value
+        else:
+            unexpected_keys.append((key, transformed_key))
+
+    if transformed_state_dict:
+        model.load_state_dict(transformed_state_dict, strict=False)
+    return set(transformed_state_dict.keys()), unexpected_keys
+
+
+def report_checkpoint_load(
+    model_keys: set[str],
+    loaded_keys: set[str],
+    unexpected_keys: list[tuple[str, str]],
+    transform_name: str,
+) -> None:
+    missing_keys = sorted(model_keys - loaded_keys)
+    print(
+        "Checkpoint tensors loaded: "
+        f"{len(loaded_keys)}/{len(model_keys)} model tensors matched."
+    )
+
+    if not loaded_keys:
+        unexpected_examples = format_key_examples(
+            [original for original, _ in unexpected_keys]
+        )
+        raise RuntimeError(
+            "Checkpoint weights did not match the model at all. "
+            f"Selected key transform: {transform_name}. "
+            f"Unexpected checkpoint key examples: {unexpected_examples}"
+        )
+
+    if missing_keys:
+        print(
+            "Warning: "
+            f"{len(missing_keys)} model tensors were not loaded from checkpoint."
+        )
+        print(f"Missing key examples: {format_key_examples(missing_keys)}")
     if unexpected_keys:
         print(f"Warning: {len(unexpected_keys)} checkpoint keys were unexpected.")
+        print(
+            "Unexpected key examples: "
+            f"{format_key_examples([original for original, _ in unexpected_keys])}"
+        )
+
+
+def format_key_examples(keys, limit: int = 5) -> str:
+    examples = [str(key) for key in list(keys)[:limit]]
+    return ", ".join(examples) if examples else "None"
 
 
 def build_prompt(tokenizer, messages: list[dict[str, str]]) -> str:
