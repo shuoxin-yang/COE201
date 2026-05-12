@@ -21,6 +21,7 @@ LoRA:
   rank: 8
   alpha: 16
   scaling_type: r/a
+  dropout_rate: 0.05
   target_modules:
     - q_proj
     - k_proj

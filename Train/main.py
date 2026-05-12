@@ -278,13 +278,23 @@ def validate_config(config: Mapping[str, Any], method: str) -> None:
 
     require_keys(
         lora_cfg,
-        ("rank", "alpha", "scaling_type", "target_modules", "init_lora_weights"),
+        (
+            "rank",
+            "alpha",
+            "scaling_type",
+            "dropout_rate",
+            "target_modules",
+            "init_lora_weights",
+        ),
         "LoRA",
     )
     if int(lora_cfg["rank"]) <= 0:
         raise ValueError("LoRA.rank must be greater than 0.")
     if float(lora_cfg["alpha"]) <= 0:
         raise ValueError("LoRA.alpha must be greater than 0.")
+    dropout_rate = float(lora_cfg["dropout_rate"])
+    if dropout_rate < 0 or dropout_rate >= 1:
+        raise ValueError("LoRA.dropout_rate must be in [0, 1).")
     target_modules = lora_cfg["target_modules"]
     if not isinstance(target_modules, list) or not target_modules:
         raise ValueError("LoRA.target_modules must be a non-empty list.")
