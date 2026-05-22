@@ -97,6 +97,13 @@ def parse_args():
         default="QA_Gen/data/QA_Augmentation",
         help="Path to the folder where augmented QA pairs will be saved.",
     )
+    parser.add_argument(
+        "-n",
+        "--n_qa",
+        type=int,
+        default=3,
+        help="Number of QA pairs to generate for each original QA pair (including the original).",
+    )
     return parser.parse_args()
 
 
@@ -119,7 +126,7 @@ if __name__ == "__main__":
         for line in f:
             qa_pairs.append(json.loads(line))
 
-    new_qa_pairs = qa_aug(qa_pairs, n_qa=3)
+    new_qa_pairs = qa_aug(qa_pairs, n_qa=args.n_qa)
 
     with open(
         f"{target_folder_path}/{rawQA_path.stem}.jsonl", "w", encoding="utf-8"
