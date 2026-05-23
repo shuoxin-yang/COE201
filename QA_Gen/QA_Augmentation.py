@@ -101,7 +101,7 @@ def parse_args():
         "-n",
         "--n_qa",
         type=int,
-        default=3,
+        default=5,
         help="Number of QA pairs to generate for each original QA pair (including the original).",
     )
     return parser.parse_args()
