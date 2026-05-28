@@ -298,6 +298,43 @@ def validate_config(config: Mapping[str, Any], method: str) -> None:
     target_modules = lora_cfg["target_modules"]
     if not isinstance(target_modules, list) or not target_modules:
         raise ValueError("LoRA.target_modules must be a non-empty list.")
+    if any(not str(target_module).strip() for target_module in target_modules):
+        raise ValueError("LoRA.target_modules must not contain empty values.")
+    target_layer_side = str(lora_cfg.get("target_layer_side", "all")).strip().lower()
+    valid_target_layer_sides = {
+        "",
+        "all",
+        "none",
+        "input",
+        "front",
+        "first",
+        "output",
+        "back",
+        "last",
+    }
+    if target_layer_side not in valid_target_layer_sides:
+        raise ValueError(
+            "LoRA.target_layer_side must be one of: all, input, output."
+        )
+    target_layer_count = lora_cfg.get("target_layer_count", 0)
+    if target_layer_count is None or target_layer_count == "":
+        target_layer_count = 0
+    try:
+        target_layer_count = int(target_layer_count)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("LoRA.target_layer_count must be an integer.") from exc
+    if target_layer_count < 0:
+        raise ValueError("LoRA.target_layer_count must be greater than or equal to 0.")
+    if target_layer_side in {"", "all", "none"} and target_layer_count != 0:
+        raise ValueError(
+            "LoRA.target_layer_count must be 0 when LoRA.target_layer_side is all."
+        )
+    if target_layer_side in {"input", "front", "first", "output", "back", "last"}:
+        if target_layer_count <= 0:
+            raise ValueError(
+                "LoRA.target_layer_count must be greater than 0 when "
+                "LoRA.target_layer_side is input or output."
+            )
     if str(lora_cfg["scaling_type"]) not in {"r/a", "r/sqrta"}:
         raise ValueError("LoRA.scaling_type must be either 'r/a' or 'r/sqrta'.")
     validate_training_config(lora_cfg, "LoRA")
@@ -785,6 +822,7 @@ def main():
         run_name=run_name,
         finetuning_type=finetune_method.method_name,
         tensorboard_logdir=args.tensorboard_logdir,
+        config=config,
     )
     config_backup_path = backup_config(config, logger.run_dir)
     assert (
@@ -828,6 +866,11 @@ def main():
     disable_model_cache(model)
     trainable_params, all_param = count_trainable_parameters(model)
     logger.logandprint(f"finetune method: {finetune_method.method_name}")
+    if hasattr(finetune_method, "target_summary"):
+        logger.logandprint(
+            finetune_method.target_summary(),
+            name="LoRA Target Selection",
+        )
     logger.logandprint(
         f"trainable params: {trainable_params:,d} || "
         f"all params: {all_param:,d} || "

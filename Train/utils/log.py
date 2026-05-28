@@ -8,6 +8,143 @@ from numbers import Real
 from typing import Any
 
 
+_MODEL_SIZE_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9.])(\d+(?:\.\d+)?B)(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+
+_TARGET_MODULE_ALIASES = {
+    "q": ("q_proj", "query_proj", "query", "q"),
+    "k": ("k_proj", "key_proj", "key", "k"),
+    "v": ("v_proj", "value_proj", "value", "v"),
+    "o": ("o_proj", "out_proj", "output_proj", "output", "o"),
+}
+
+
+def build_lora_run_dir_name(config: Mapping[str, Any]) -> str:
+    global_cfg = _require_mapping(config, "global")
+    lora_cfg = _require_mapping(config, "LoRA")
+
+    parts = [
+        _extract_model_size(global_cfg.get("model_name")),
+        f"R-{_format_number(_require_value(lora_cfg, 'rank'))}",
+    ]
+
+    scaling_type = _normalize_scaling_type(lora_cfg.get("scaling_type", "r/a"))
+    if scaling_type != "r/a":
+        parts.append(f"AL-{_sanitize_name_part(scaling_type, fallback='scaling')}")
+
+    dropout_rate = _to_float(lora_cfg.get("dropout_rate", 0.0), "LoRA.dropout_rate")
+    if dropout_rate != 0:
+        parts.append(f"DR-{_format_number(dropout_rate)}")
+
+    parts.append(_build_layer_selection_name(lora_cfg))
+    parts.append(_build_target_module_name(_require_value(lora_cfg, "target_modules")))
+    return "_".join(parts)
+
+
+def _require_mapping(config: Mapping[str, Any], key: str) -> Mapping[str, Any]:
+    value = config.get(key)
+    if not isinstance(value, Mapping):
+        raise ValueError(f"Config section '{key}' must be a mapping.")
+    return value
+
+
+def _require_value(config: Mapping[str, Any], key: str) -> Any:
+    if key not in config or config[key] in (None, ""):
+        raise ValueError(f"Config value 'LoRA.{key}' is required for log naming.")
+    return config[key]
+
+
+def _extract_model_size(model_name: Any) -> str:
+    match = _MODEL_SIZE_PATTERN.search(str(model_name or ""))
+    if not match:
+        raise ValueError(
+            "global.model_name must contain a model size like 4B, 2B, or 0.8B "
+            "for LoRA log naming."
+        )
+    return match.group(1).replace("b", "B")
+
+
+def _normalize_scaling_type(value: Any) -> str:
+    return str(value).strip().lower().replace("_", "/") or "r/a"
+
+
+def _build_layer_selection_name(lora_cfg: Mapping[str, Any]) -> str:
+    side = str(lora_cfg.get("target_layer_side", "all")).strip().lower()
+    if side in {"", "all", "none", "full"}:
+        return "full"
+
+    if side in {"front", "first", "input", "top"}:
+        prefix = "top"
+    elif side in {"back", "last", "output", "end"}:
+        prefix = "end"
+    else:
+        raise ValueError("LoRA.target_layer_side must be one of: all, input, output.")
+
+    count = int(_require_value(lora_cfg, "target_layer_count"))
+    if count <= 0:
+        raise ValueError(
+            "LoRA.target_layer_count must be greater than 0 when "
+            "LoRA.target_layer_side is input/output."
+        )
+    return f"{prefix}-{count}"
+
+
+def _build_target_module_name(target_modules: Any) -> str:
+    if isinstance(target_modules, str):
+        modules = [
+            module.strip()
+            for module in re.split(r"[, ]+", target_modules)
+            if module.strip()
+        ]
+    elif isinstance(target_modules, Sequence):
+        modules = [str(module).strip() for module in target_modules if str(module).strip()]
+    else:
+        raise ValueError("LoRA.target_modules must be a non-empty list or string.")
+
+    if not modules:
+        raise ValueError("LoRA.target_modules must not be empty.")
+
+    enabled = []
+    for letter, aliases in _TARGET_MODULE_ALIASES.items():
+        if any(_matches_target_alias(module, aliases) for module in modules):
+            enabled.append(letter)
+
+    if enabled:
+        return "".join(enabled)
+
+    compact_modules = [
+        _sanitize_name_part(module.rsplit(".", 1)[-1], fallback="module")
+        for module in modules
+    ]
+    return "-".join(dict.fromkeys(compact_modules))
+
+
+def _matches_target_alias(module: str, aliases: tuple[str, ...]) -> bool:
+    basename = module.rsplit(".", 1)[-1].strip().lower()
+    return basename in aliases
+
+
+def _to_float(value: Any, name: str) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be numeric for log naming.") from exc
+
+
+def _format_number(value: Any) -> str:
+    number = _to_float(value, "number")
+    if number.is_integer():
+        return str(int(number))
+    return f"{number:g}"
+
+
+def _sanitize_name_part(value: str, fallback: str) -> str:
+    safe_value = re.sub(r"[\\/:\s=]+", "-", str(value).strip())
+    return safe_value.strip("-_") or fallback
+
+
 class Logger:
     def __init__(
         self,
@@ -16,12 +153,17 @@ class Logger:
         finetuning_type: str | None = None,
         log_file: str | None = None,
         tensorboard_logdir: str | None = None,
+        config: Mapping[str, Any] | None = None,
     ):
         self.tensorboard_logdir = None
         self.tensorboard_writer = None
         if log_file is None:
             if log_path is not None and finetuning_type is not None:
-                run_dir_name = self._build_run_dir_name(finetuning_type, run_name)
+                run_dir_name = self._build_run_dir_name(
+                    finetuning_type,
+                    run_name,
+                    config,
+                )
                 self.run_dir_name = run_dir_name
                 self.run_dir = os.path.join(log_path, run_dir_name)
                 self.checkpoint_dir = os.path.join(self.run_dir, "checkpoints")
@@ -57,7 +199,11 @@ class Logger:
         self,
         finetuning_type: str,
         run_name: str | None = None,
+        config: Mapping[str, Any] | None = None,
     ) -> str:
+        if str(finetuning_type).strip().lower() == "lora" and config is not None:
+            return build_lora_run_dir_name(config)
+
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         parts = [
             timestamp,
