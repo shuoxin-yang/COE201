@@ -21,7 +21,7 @@ _TARGET_MODULE_ALIASES = {
 }
 
 
-def build_lora_run_dir_name(config: Mapping[str, Any]) -> str:
+def build_lora_run_core_name(config: Mapping[str, Any]) -> str:
     global_cfg = _require_mapping(config, "global")
     lora_cfg = _require_mapping(config, "LoRA")
 
@@ -41,6 +41,29 @@ def build_lora_run_dir_name(config: Mapping[str, Any]) -> str:
     parts.append(_build_layer_selection_name(lora_cfg))
     parts.append(_build_target_module_name(_require_value(lora_cfg, "target_modules")))
     return "_".join(parts)
+
+
+def build_lora_run_dir_name(
+    config: Mapping[str, Any],
+    run_name: str | None = None,
+    timestamp: str | None = None,
+) -> str:
+    parts = [_format_run_timestamp(timestamp), build_lora_run_core_name(config)]
+    if run_name is not None and str(run_name).strip():
+        parts.append(_sanitize_name_part(run_name, fallback="run"))
+    return "_".join(parts)
+
+
+def _format_run_timestamp(timestamp: str | None = None) -> str:
+    if timestamp is None:
+        return time.strftime("%m%d%H%M%S")
+
+    digits = re.sub(r"\D", "", str(timestamp))
+    if len(digits) == 10:
+        return digits
+    if len(digits) == 14:
+        return digits[4:]
+    raise ValueError("Log timestamp must be mmddhhmmss or yyyymmddhhmmss.")
 
 
 def _require_mapping(config: Mapping[str, Any], key: str) -> Mapping[str, Any]:
@@ -202,9 +225,9 @@ class Logger:
         config: Mapping[str, Any] | None = None,
     ) -> str:
         if str(finetuning_type).strip().lower() == "lora" and config is not None:
-            return build_lora_run_dir_name(config)
+            return build_lora_run_dir_name(config, run_name=run_name)
 
-        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        timestamp = time.strftime("%m%d%H%M%S")
         parts = [
             timestamp,
             self._sanitize_run_dir_part(finetuning_type, fallback="finetuning"),

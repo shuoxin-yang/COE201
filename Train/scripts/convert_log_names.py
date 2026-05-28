@@ -5,6 +5,7 @@ import argparse
 import copy
 import re
 import sys
+import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -15,7 +16,7 @@ DEFAULT_LOG_ROOT = TRAIN_DIR / "logs"
 if str(TRAIN_DIR) not in sys.path:
     sys.path.insert(0, str(TRAIN_DIR))
 
-from utils.log import build_lora_run_dir_name
+from utils.log import build_lora_run_core_name, build_lora_run_dir_name
 
 
 MODEL_SIZE_PATTERN = re.compile(
@@ -33,7 +34,7 @@ MODULE_CODE_TO_TARGET = {
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Rename old LoRA log directories to the new compact format."
+        description="Rename old LoRA log directories to the new timestamped format."
     )
     parser.add_argument(
         "log_root",
@@ -117,7 +118,11 @@ def convert_run_dir(run_dir: Path, args: argparse.Namespace) -> bool:
     patch_missing_from_dir_name(config, run_dir.name)
     try:
         ensure_layer_selection(config, run_dir.name, args)
-        target_name = build_lora_run_dir_name(config)
+        target_name = build_lora_run_dir_name(
+            config,
+            run_name=infer_run_name(run_dir, config),
+            timestamp=infer_run_timestamp(run_dir),
+        )
     except ValueError as exc:
         print(f"[skip] {run_dir.name}: {exc}")
         return False
@@ -163,6 +168,93 @@ def convert_run_dir(run_dir: Path, args: argparse.Namespace) -> bool:
         print(f"[rename] tensorboard {tensorboard_dir} -> {tensorboard_target_dir}")
     print(f"[rename] {run_dir.name} -> {target_dir.name}")
     return True
+
+
+def infer_run_timestamp(run_dir: Path) -> str:
+    timestamp, _ = split_timestamp_prefix(run_dir.name)
+    if timestamp is not None:
+        return timestamp
+
+    timestamp = time.strftime("%m%d%H%M%S", time.localtime(run_dir.stat().st_mtime))
+    print(f"[infer] {run_dir.name}: timestamp -> {timestamp} from directory mtime")
+    return timestamp
+
+
+def infer_run_name(run_dir: Path, config: dict[str, Any]) -> str | None:
+    logged_run_name = find_logged_run_name(run_dir)
+    if logged_run_name is not RUN_NAME_NOT_FOUND:
+        return logged_run_name
+
+    run_name = infer_run_name_from_dir_name(run_dir.name, config)
+    if run_name:
+        print(f"[infer] {run_dir.name}: run_name -> {run_name}")
+    return run_name
+
+
+def infer_run_name_from_dir_name(
+    dir_name: str,
+    config: dict[str, Any],
+) -> str | None:
+    _, rest = split_timestamp_prefix(dir_name)
+    if not rest:
+        return None
+
+    core_name = build_lora_run_core_name(config)
+    if rest == core_name:
+        return None
+    if rest.startswith(f"{core_name}_"):
+        return rest[len(core_name) + 1 :] or None
+
+    if rest.lower() == "lora":
+        return None
+    if rest.lower().startswith("lora_"):
+        return rest[5:] or None
+
+    return None
+
+
+def split_timestamp_prefix(dir_name: str) -> tuple[str | None, str]:
+    full_timestamp = re.match(
+        r"^(\d{4})(\d{2})(\d{2})[_-]?(\d{2})(\d{2})(\d{2})(?:[_-]|$)",
+        dir_name,
+    )
+    if full_timestamp:
+        timestamp = "".join(full_timestamp.groups()[1:])
+        return timestamp, dir_name[full_timestamp.end() :].lstrip("_-")
+
+    short_timestamp = re.match(
+        r"^(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(?:[_-]|$)",
+        dir_name,
+    )
+    if short_timestamp:
+        timestamp = "".join(short_timestamp.groups())
+        return timestamp, dir_name[short_timestamp.end() :].lstrip("_-")
+
+    return None, dir_name
+
+
+RUN_NAME_NOT_FOUND = object()
+
+
+def find_logged_run_name(run_dir: Path) -> str | None | object:
+    log_file = run_dir / "log.txt"
+    if not log_file.is_file():
+        return RUN_NAME_NOT_FOUND
+
+    try:
+        text = log_file.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return RUN_NAME_NOT_FOUND
+
+    for line in text.splitlines():
+        match = re.search(r"\brun_name:\s*(.*?)\s*$", line)
+        if not match:
+            continue
+        value = clean_log_value(match.group(1))
+        if not value or value.lower() in {"none", "null"}:
+            return None
+        return value
+    return RUN_NAME_NOT_FOUND
 
 
 def find_tensorboard_dir(
@@ -310,6 +402,11 @@ def unique_paths(paths: list[Path]) -> list[Path]:
 
 def is_lora_run(run_dir: Path) -> bool:
     if "lora" in run_dir.name.lower():
+        return True
+    if MODEL_SIZE_PATTERN.search(run_dir.name) and re.search(
+        r"(?:^|_)R-\d+",
+        run_dir.name,
+    ):
         return True
 
     log_file = run_dir / "log.txt"
