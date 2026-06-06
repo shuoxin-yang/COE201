@@ -17,7 +17,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MODEL_ROOT = PROJECT_ROOT / "model"
 TRAIN_DIR = PROJECT_ROOT / "Train"
-DEFAULT_MODEL_NAME = "Qwen3.5-4B"
+DEFAULT_MODEL_NAME = "Qwen3.5-2B"
 PEFT_ADAPTER_CONFIG = "adapter_config.json"
 TRAINING_CONFIG = "config.yaml"
 SAFE_WEIGHTS = "model.safetensors"
@@ -106,7 +106,7 @@ def argparser():
     parser.add_argument(
         "--device",
         type=str,
-        default="cuda" if torch.cuda.is_available() else "cpu",
+        default="cuda" if torch.cuda.is_available() else "mps",
         help="Device used for inference.",
     )
     parser.add_argument(
