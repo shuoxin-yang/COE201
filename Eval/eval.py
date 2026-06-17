@@ -61,7 +61,8 @@ def argparser():
     parser.add_argument(
         "--adapter_path",
         type=str,
-        default=None,
+        default="/Users/yangyuhui/Study/Large Model/Project/Train/logs/0531144908_2B_R-4_DR-0.5_full_qkvo_DropoutTest/checkpoints/model-final",
+        # default=None,
         help=(
             "Optional adapter/checkpoint path. Supports PEFT LoRA/PrefixFT adapter "
             "directories and custom AdapterFinetuning Trainer checkpoints."
